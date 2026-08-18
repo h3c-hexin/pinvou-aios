@@ -1,0 +1,17 @@
+[Unit]
+Description=Pinvou AIOS agent runtime daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hexin/opencode_projects/pinvou-aios
+ExecStart=/home/hexin/opencode_projects/pinvou-aios/target/release/pinvou-aiosd
+Environment=PINVOU_PI_BIN=/home/hexin/opencode_projects/pi/pi-test.sh
+Environment=PINVOU_PI_PROVIDER=deepseek
+Environment=PINVOU_PI_MODEL=deepseek-v4-flash
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

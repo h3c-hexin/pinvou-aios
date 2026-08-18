@@ -1,0 +1,6 @@
+**/target/
+/apps/pad-ui/node_modules/
+/apps/pad-ui/dist/
+/apps/pad-ui/src-tauri/target/
+/.env
+*.log

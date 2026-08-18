@@ -1,0 +1,17 @@
+[package]
+name = "pinvou-aios-pad-ui"
+version = "0.1.0"
+description = "Pinvou AIOS Linux PAD shell"
+edition = "2024"
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["net", "io-util", "time"] }
+uuid = { version = "1", features = ["v4"] }
+

@@ -28,4 +28,5 @@
 - `task.progress`：`{ "taskId": "...", "message": "...", "percent": 30 }`
 - `task.complete`：`{ "taskId": "...", "result": "..." }`
 - `task.cancel`：`{ "taskId": "..." }`
-
+- `surface.modify`：`{ "taskId": "...", "artifactPath": "...", "instruction": "...", "selection": { ... } }`
+- `surface.undo`：`{ "taskId": "...", "artifactPath": "..." }`

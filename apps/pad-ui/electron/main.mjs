@@ -39,6 +39,11 @@ let browserOpen = false;
 let browserLoading = false;
 let browserTitle = "";
 let browserBounds = { x: 0, y: 0, width: 0, height: 0 };
+let currentTaskArtifact;
+let surfaceEditMode = false;
+let surfaceSelection;
+let artifactWatcher;
+let artifactReloadTimer;
 
 function sendBrowserState(extra = {}) {
   const state = browserState(extra);
@@ -60,6 +65,12 @@ function browserState(extra = {}) {
     title: browserTitle,
     bounds: browserBounds,
     cdpEndpoint,
+    editable: Boolean(currentTaskArtifact),
+    editMode: surfaceEditMode,
+    taskId: currentTaskArtifact?.taskId,
+    selection: surfaceSelection
+      ? { taskId: currentTaskArtifact?.taskId, ...surfaceSelection }
+      : undefined,
     ...extra,
   };
 }
@@ -81,9 +92,117 @@ function applyBrowserVisibility() {
   }
 }
 
+function sendSurfaceSelection() {
+  if (uiView && !uiView.webContents.isDestroyed()) {
+    uiView.webContents.send("surface:selection", surfaceSelection
+      ? { taskId: currentTaskArtifact?.taskId, ...surfaceSelection }
+      : null);
+  }
+}
+
+function stopArtifactWatcher() {
+  if (artifactWatcher) artifactWatcher.close();
+  artifactWatcher = undefined;
+  if (artifactReloadTimer) clearTimeout(artifactReloadTimer);
+  artifactReloadTimer = undefined;
+}
+
+function watchCurrentArtifact() {
+  stopArtifactWatcher();
+  if (!currentTaskArtifact) return;
+  const directory = path.dirname(currentTaskArtifact.path);
+  const filename = path.basename(currentTaskArtifact.path);
+  artifactWatcher = fs.watch(directory, (_eventType, changed) => {
+    if (changed && String(changed) !== filename) return;
+    if (artifactReloadTimer) clearTimeout(artifactReloadTimer);
+    artifactReloadTimer = setTimeout(() => {
+      artifactReloadTimer = undefined;
+      if (!currentTaskArtifact || !browserView || browserView.webContents.isDestroyed()) return;
+      if (!isCurrentTaskArtifact(browserView.webContents.getURL())) return;
+      browserView.webContents.reload();
+    }, 350);
+  });
+  artifactWatcher.on("error", (error) => {
+    sendBrowserState({ error: `无法监控 HTML 产物变化：${error.message}` });
+  });
+}
+
+function clearTaskArtifact() {
+  stopArtifactWatcher();
+  currentTaskArtifact = undefined;
+  surfaceEditMode = false;
+  surfaceSelection = undefined;
+  sendSurfaceSelection();
+}
+
+function isCurrentTaskArtifact(location) {
+  if (!currentTaskArtifact) return false;
+  try {
+    const parsed = new URL(location);
+    if (parsed.protocol !== "file:") return false;
+    return path.resolve(fileURLToPath(parsed)) === currentTaskArtifact.path;
+  } catch {
+    return false;
+  }
+}
+
+function setSurfaceEditMode(enabled) {
+  if (enabled && (!currentTaskArtifact || !isCurrentTaskArtifact(browserView.webContents.getURL()))) {
+    throw new Error("AI 修改仅支持从任务卡片打开的本地 HTML 产物");
+  }
+  surfaceEditMode = Boolean(enabled);
+  if (!surfaceEditMode) {
+    surfaceSelection = undefined;
+    sendSurfaceSelection();
+  }
+  browserView.webContents.send("surface:edit-mode", {
+    enabled: surfaceEditMode,
+    restoreSelector: surfaceSelection?.selector,
+  });
+  return sendBrowserState({ reason: "surface-edit-mode" });
+}
+
+function cleanString(value, maximum) {
+  if (typeof value !== "string") return undefined;
+  const cleaned = value.slice(0, maximum);
+  return cleaned || undefined;
+}
+
+function sanitizeSurfaceSelection(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const selector = cleanString(value.selector, 2_000);
+  const tagName = cleanString(value.tagName, 80);
+  if (!selector || !tagName) return undefined;
+  const stringMap = (input, maximumEntries, maximumValue) => Object.fromEntries(
+    Object.entries(input && typeof input === "object" ? input : {})
+      .slice(0, maximumEntries)
+      .map(([key, item]) => [String(key).slice(0, 100), cleanString(item, maximumValue) || ""]),
+  );
+  const rect = value.rect && typeof value.rect === "object"
+    ? Object.fromEntries(["x", "y", "width", "height"].map((key) => [
+      key,
+      Number.isFinite(Number(value.rect[key])) ? Math.round(Number(value.rect[key])) : 0,
+    ]))
+    : {};
+  return {
+    selector,
+    nodeId: cleanString(value.nodeId, 300),
+    tagName,
+    text: cleanString(value.text, 1_000) || "",
+    outerHTML: cleanString(value.outerHTML, 8_000) || "",
+    attributes: stringMap(value.attributes, 30, 500),
+    breadcrumbs: Array.isArray(value.breadcrumbs)
+      ? value.breadcrumbs.slice(0, 8).map((item) => String(item).slice(0, 300))
+      : [],
+    rect,
+    styles: stringMap(value.styles, 30, 500),
+  };
+}
+
 function createBrowserSurface() {
   browserView = new WebContentsView({
     webPreferences: {
+      preload: path.join(electronDirectory, "browser-preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -104,8 +223,15 @@ function createBrowserSurface() {
     if (hasBrowserContent(location)) browserOpen = true;
     applyBrowserVisibility();
     sendBrowserState({ reason: "navigation" });
+    if (surfaceEditMode && currentTaskArtifact && isCurrentTaskArtifact(location)) {
+      browserView.webContents.send("surface:edit-mode", {
+        enabled: true,
+        restoreSelector: surfaceSelection?.selector,
+      });
+    }
   });
   browserView.webContents.on("did-navigate", (_event, location) => {
+    if (currentTaskArtifact && !isCurrentTaskArtifact(location)) clearTaskArtifact();
     if (hasBrowserContent(location)) browserOpen = true;
     applyBrowserVisibility();
     sendBrowserState({ location, reason: "navigation" });
@@ -178,7 +304,11 @@ function normalizeTaskArtifactLocation(taskIdValue, locationValue) {
   if (!fs.statSync(resolvedArtifact).isFile()) {
     throw new Error("任务 HTML 产物路径不是文件");
   }
-  return pathToFileURL(resolvedArtifact).toString();
+  return {
+    taskId,
+    path: resolvedArtifact,
+    target: pathToFileURL(resolvedArtifact).toString(),
+  };
 }
 
 function daemonRequest(method, params) {
@@ -269,6 +399,12 @@ function registerIpc() {
       throw new Error("untrusted renderer attempted to call Pinvou AIOS IPC");
     }
   };
+  ipcMain.on("surface:selection", (event, value) => {
+    if (!browserView || event.sender.id !== browserView.webContents.id) return;
+    if (!surfaceEditMode || !currentTaskArtifact) return;
+    surfaceSelection = sanitizeSurfaceSelection(value);
+    sendSurfaceSelection();
+  });
   ipcMain.handle("daemon:request", (event, { method, params }) => {
     trusted(event);
     return daemonRequest(method, params || {});
@@ -280,6 +416,7 @@ function registerIpc() {
   ipcMain.handle("browser:open", async (event, { location }) => {
     trusted(event);
     const target = normalizeBrowserLocation(location);
+    clearTaskArtifact();
     browserOpen = true;
     applyBrowserVisibility();
     await browserView.webContents.loadURL(target);
@@ -287,10 +424,12 @@ function registerIpc() {
   });
   ipcMain.handle("browser:open-task-artifact", async (event, { taskId, location }) => {
     trusted(event);
-    const target = normalizeTaskArtifactLocation(taskId, location);
+    clearTaskArtifact();
+    currentTaskArtifact = normalizeTaskArtifactLocation(taskId, location);
+    watchCurrentArtifact();
     browserOpen = true;
     applyBrowserVisibility();
-    await browserView.webContents.loadURL(target);
+    await browserView.webContents.loadURL(currentTaskArtifact.target);
     return sendBrowserState({ reason: "task-artifact" });
   });
   ipcMain.handle("browser:control", async (event, { action }) => {
@@ -308,6 +447,7 @@ function registerIpc() {
       case "close":
         browserOpen = false;
         browserVisible = false;
+        clearTaskArtifact();
         applyBrowserVisibility();
         break;
       default:
@@ -326,6 +466,40 @@ function registerIpc() {
     browserVisible = Boolean(visible);
     applyBrowserVisibility();
     return browserState();
+  });
+  ipcMain.handle("surface:set-edit-mode", (event, { enabled }) => {
+    trusted(event);
+    return setSurfaceEditMode(enabled);
+  });
+  ipcMain.handle("surface:clear-selection", (event) => {
+    trusted(event);
+    if (!surfaceEditMode) return browserState();
+    surfaceSelection = undefined;
+    browserView.webContents.send("surface:clear-selection");
+    sendSurfaceSelection();
+    return browserState();
+  });
+  ipcMain.handle("surface:modify", async (event, { instruction }) => {
+    trusted(event);
+    if (!surfaceEditMode || !currentTaskArtifact) throw new Error("请先打开任务 HTML 并开启 AI 修改");
+    if (!surfaceSelection) throw new Error("请先在页面中点击要修改的元素");
+    const request = String(instruction || "").trim();
+    if (!request) throw new Error("请输入修改要求");
+    if (request.length > 4_000) throw new Error("单次修改要求不能超过 4000 个字符");
+    return daemonRequest("surface.modify", {
+      taskId: currentTaskArtifact.taskId,
+      artifactPath: currentTaskArtifact.path,
+      instruction: request,
+      selection: surfaceSelection,
+    });
+  });
+  ipcMain.handle("surface:undo", async (event) => {
+    trusted(event);
+    if (!currentTaskArtifact) throw new Error("当前页面不是可编辑的任务 HTML");
+    return daemonRequest("surface.undo", {
+      taskId: currentTaskArtifact.taskId,
+      artifactPath: currentTaskArtifact.path,
+    });
   });
 }
 
@@ -367,6 +541,7 @@ async function createMainWindow() {
   else await uiView.webContents.loadFile(path.join(appDirectory, "dist", "index.html"));
   mainWindow.show();
   mainWindow.on("closed", () => {
+    stopArtifactWatcher();
     if (browserView && !browserView.webContents.isDestroyed()) browserView.webContents.close();
     if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.close();
     browserView = undefined;

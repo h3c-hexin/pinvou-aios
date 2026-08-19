@@ -43,6 +43,8 @@ sudo chmod 4755 apps/pad-ui/node_modules/electron/dist/chrome-sandbox
 
 主 Agent 没有 `bash` 或 `read`，而是把命令参数作为数组传给 `playwright_cli`；该工具使用 `shell: false` 启动项目锁定的 CLI。默认 Session 是 `pinvou-main`。Electron 把内置 Chromium 的随机本机 CDP 端点写入 `~/.pinvou-aios/run/browser-cdp.json`，CLI 自动附着该端点；如果 UI 未运行，工具会报错而不会回退弹出外部 Chrome。页面操作、调试、网络、存储和数据命令均保留；`open` 被映射为内置页面导航，因此外部浏览器、Profile、浏览器类型和 headed/headless 等启动参数不适用于 Browser Surface。Agent 可以通过 `--help` 渐进发现命令说明。
 
+从任务卡片打开本地 HTML 后，右侧工具栏会启用“AI 修改”：开启后可点击页面元素，再用自然语言描述修改要求。选择层运行在 Browser Surface 的隔离 preload 中，不向普通网页暴露 Electron API；修改请求会恢复生成该产物的原 Worker 会话，先在任务目录的 `.aios/revisions/` 保存快照，再修改源 HTML。文件变化会自动刷新画布并尽量恢复原选择，工具栏支持逐次撤销。普通 HTTP/HTTPS 页面不能进入该编辑模式。
+
 例如主 Agent 可以依次调用：
 
 ```json

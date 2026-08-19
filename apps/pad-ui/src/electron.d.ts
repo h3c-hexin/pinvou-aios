@@ -13,6 +13,23 @@ interface PinvouBrowserState {
   cdpEndpoint?: string;
   reason?: string;
   error?: string;
+  editable?: boolean;
+  editMode?: boolean;
+  taskId?: string;
+  selection?: PinvouSurfaceSelection;
+}
+
+interface PinvouSurfaceSelection {
+  taskId?: string;
+  selector: string;
+  nodeId?: string;
+  tagName: string;
+  text: string;
+  outerHTML: string;
+  attributes: Record<string, string>;
+  breadcrumbs: string[];
+  rect: { x: number; y: number; width: number; height: number };
+  styles: Record<string, string>;
 }
 
 interface PinvouBridge {
@@ -28,7 +45,12 @@ interface PinvouBridge {
     height?: number;
     visible: boolean;
   }): Promise<PinvouBrowserState>;
+  surfaceSetEditMode(enabled: boolean): Promise<PinvouBrowserState>;
+  surfaceClearSelection(): Promise<PinvouBrowserState>;
+  surfaceModify(instruction: string): Promise<unknown>;
+  surfaceUndo(): Promise<unknown>;
   onBrowserState(listener: (state: PinvouBrowserState) => void): () => void;
+  onSurfaceSelection(listener: (selection?: PinvouSurfaceSelection) => void): () => void;
 }
 
 declare global {

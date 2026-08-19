@@ -10,9 +10,12 @@ import {
   ExternalLink,
   Globe2,
   Mic,
+  MousePointer2,
   Plus,
   RefreshCw,
   Send,
+  Sparkles,
+  Undo2,
   X,
 } from "lucide-react";
 import "./styles.css";
@@ -62,6 +65,23 @@ interface BrowserState {
   cdpEndpoint?: string;
   reason?: string;
   error?: string;
+  editable?: boolean;
+  editMode?: boolean;
+  taskId?: string;
+  selection?: SurfaceSelection;
+}
+
+interface SurfaceSelection {
+  taskId?: string;
+  selector: string;
+  nodeId?: string;
+  tagName: string;
+  text: string;
+  outerHTML: string;
+  attributes: Record<string, string>;
+  breadcrumbs: string[];
+  rect: { x: number; y: number; width: number; height: number };
+  styles: Record<string, string>;
 }
 
 const emptySnapshot: Snapshot = {
@@ -147,6 +167,10 @@ function App() {
   });
   const [browserBusy, setBrowserBusy] = React.useState(false);
   const [browserError, setBrowserError] = React.useState<string>();
+  const [surfaceSelection, setSurfaceSelection] = React.useState<SurfaceSelection>();
+  const [surfaceInstruction, setSurfaceInstruction] = React.useState("");
+  const [surfaceBusy, setSurfaceBusy] = React.useState(false);
+  const [surfaceFeedback, setSurfaceFeedback] = React.useState<string>();
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const browserViewportRef = React.useRef<HTMLDivElement>(null);
   const observedTaskStates = React.useRef<Map<string, TaskState>>(new Map());
@@ -186,17 +210,24 @@ function App() {
     void window.pinvou.browserStatus()
       .then((state) => {
         setBrowserState(state);
+        setSurfaceSelection(state.selection);
         if (!isBrowserPlaceholder(state.location)) setBrowserLocation(state.location);
       })
       .catch((reason) => setBrowserError(String(reason)));
     return window.pinvou.onBrowserState((state) => {
       setBrowserState(state);
       if (state.error) setBrowserError(state.error);
+      if (state.selection) setSurfaceSelection(state.selection);
+      else if (!state.editMode || !state.editable) setSurfaceSelection(undefined);
       if (!isBrowserPlaceholder(state.location)) {
         setBrowserLocation(state.location);
       }
     });
   }, []);
+
+  React.useEffect(() => window.pinvou.onSurfaceSelection((selection) => {
+    setSurfaceSelection(selection);
+  }), []);
 
   React.useLayoutEffect(() => {
     const viewport = browserViewportRef.current;
@@ -333,6 +364,56 @@ function App() {
     }
   }
 
+  async function toggleSurfaceEdit() {
+    setBrowserError(undefined);
+    setSurfaceFeedback(undefined);
+    try {
+      const state = await window.pinvou.surfaceSetEditMode(!browserState.editMode);
+      setBrowserState(state);
+      if (!state.editMode) {
+        setSurfaceSelection(undefined);
+        setSurfaceInstruction("");
+      }
+    } catch (reason) {
+      setBrowserError(String(reason));
+    }
+  }
+
+  async function submitSurfaceEdit(event: React.FormEvent) {
+    event.preventDefault();
+    const instruction = surfaceInstruction.trim();
+    if (!instruction || !surfaceSelection || surfaceBusy) return;
+    setSurfaceBusy(true);
+    setBrowserError(undefined);
+    setSurfaceFeedback(undefined);
+    try {
+      await window.pinvou.surfaceModify(instruction);
+      setSurfaceInstruction("");
+      setSurfaceFeedback("已交给原任务 Agent，完成后画布会自动刷新");
+      await refresh();
+    } catch (reason) {
+      setBrowserError(String(reason));
+    } finally {
+      setSurfaceBusy(false);
+    }
+  }
+
+  async function undoSurfaceEdit() {
+    if (surfaceBusy) return;
+    setSurfaceBusy(true);
+    setBrowserError(undefined);
+    setSurfaceFeedback(undefined);
+    try {
+      await window.pinvou.surfaceUndo();
+      setSurfaceFeedback("已恢复到上一个 HTML 版本");
+      await refresh();
+    } catch (reason) {
+      setBrowserError(String(reason));
+    } finally {
+      setSurfaceBusy(false);
+    }
+  }
+
   const running = snapshot.tasks.filter((task) => task.state === "running" || task.state === "queued");
   const orderedTasks = [
     ...running,
@@ -340,6 +421,8 @@ function App() {
   ];
   const messages = snapshot.main.messages;
   const mainNeedsSetup = snapshot.main.status === "needs_setup" || snapshot.main.status === "offline";
+  const surfaceTask = snapshot.tasks.find((task) => task.id === browserState.taskId);
+  const surfaceTaskActive = surfaceTask?.state === "queued" || surfaceTask?.state === "running";
 
   return (
     <main className="shell">
@@ -439,6 +522,15 @@ function App() {
               <button type="button" title="后退" disabled={!browserState.open} onClick={() => void controlBrowser("back")}><ArrowLeft size={17} /></button>
               <button type="button" title="前进" disabled={!browserState.open} onClick={() => void controlBrowser("forward")}><ArrowRight size={17} /></button>
               <button type="button" title="刷新" disabled={!browserState.open} onClick={() => void controlBrowser("reload")}><RefreshCw size={16} /></button>
+              <button
+                className={`surface-edit-toggle ${browserState.editMode ? "surface-edit-toggle--active" : ""}`}
+                type="button"
+                title={browserState.editable ? "点击页面元素并告诉 AI 如何修改" : "仅任务生成的本地 HTML 支持 AI 修改"}
+                disabled={!browserState.editable}
+                onClick={() => void toggleSurfaceEdit()}
+              >
+                <MousePointer2 size={15} /><span>AI 修改</span>
+              </button>
               <div className="browser-address">
                 <Globe2 size={15} />
                 <input
@@ -465,6 +557,48 @@ function App() {
             </div>
             <div className="browser-viewport" ref={browserViewportRef} aria-label="内置 Chromium 页面区域" />
           </section>
+
+          {browserState.editMode && (
+            <form className="surface-editor glass-panel" onSubmit={submitSurfaceEdit}>
+              <div className="surface-editor__context">
+                <span className={`surface-editor__target ${surfaceSelection ? "surface-editor__target--selected" : ""}`}>
+                  <MousePointer2 size={14} />
+                  {surfaceSelection
+                    ? `${surfaceSelection.tagName}${surfaceSelection.nodeId ? ` · ${surfaceSelection.nodeId}` : ""}`
+                    : "请点击页面中的元素"}
+                </span>
+                {surfaceSelection?.text && <span className="surface-editor__preview">{surfaceSelection.text}</span>}
+                <button type="button" className="surface-editor__undo" disabled={surfaceBusy || surfaceTaskActive} onClick={() => void undoSurfaceEdit()}>
+                  <Undo2 size={14} />撤销
+                </button>
+              </div>
+              <div className="surface-editor__composer">
+                <Sparkles size={17} />
+                <textarea
+                  value={surfaceInstruction}
+                  onChange={(event) => setSurfaceInstruction(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
+                  placeholder={surfaceSelection ? "告诉 AI 这里要怎么改…" : "先在上方页面中选择一个元素"}
+                  rows={1}
+                  disabled={!surfaceSelection || surfaceTaskActive}
+                />
+                <button type="submit" disabled={!surfaceInstruction.trim() || !surfaceSelection || surfaceBusy || surfaceTaskActive}>
+                  {surfaceTaskActive ? "修改中" : surfaceBusy ? "派发中" : "修改"}<Send size={15} />
+                </button>
+              </div>
+              {(surfaceFeedback || surfaceTaskActive) && (
+                <div className="surface-editor__feedback">
+                  <span className={`status-dot status-dot--${surfaceTaskActive ? "running" : "completed"}`} />
+                  {surfaceTaskActive ? surfaceTask?.progressMessage || "任务 Agent 正在修改画布" : surfaceFeedback}
+                </div>
+              )}
+            </form>
+          )}
 
           {browserError && <div className="browser-error">{browserError}</div>}
         </div>

@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
+import { runPlaywrightCli } from "../browser/runner.js";
+
 const socketPath = () =>
   process.env.PINVOU_AIOS_SOCKET || path.join(process.env.PINVOU_AIOS_HOME || path.join(os.homedir(), ".pinvou-aios"), "run", "aios.sock");
 
@@ -49,6 +51,12 @@ const object = (properties, required = Object.keys(properties)) => ({
 });
 const string = (description) => ({ type: "string", description });
 const number = (description) => ({ type: "number", description });
+const stringArray = (description) => ({
+  type: "array",
+  description,
+  items: { type: "string" },
+  minItems: 1,
+});
 
 function output(value) {
   return {
@@ -62,6 +70,34 @@ export default function (pi) {
   const taskId = process.env.PINVOU_TASK_ID;
 
   if (role === "main") {
+    pi.registerTool({
+      name: "playwright_cli",
+      label: "Playwright CLI",
+      description:
+        "调用官方 playwright-cli 操作 AIOS 内置的人机共享 Chromium。args 是去掉 playwright-cli 可执行文件名后的 argv；页面操作、调试、网络、存储、Session、run-code、eval 和上传等命令均可用。AIOS 接管浏览器生命周期，因此 open 会映射为内置页面导航，外部浏览器、Profile 和 headed 等启动参数不适用。参数不会经过 shell。使用 ['--help'] 或 ['--help', '<command>'] 查看帮助；使用 ['--raw', 'snapshot'] 将页面语义快照直接返回。",
+      promptSnippet: "通过官方 playwright-cli 的全部命令控制 AIOS 内置共享浏览器",
+      promptGuidelines: [
+        "网页任务使用 playwright_cli；将 `playwright-cli <args...>` 中的参数转换为 playwright_cli 的 args 数组，不要请求 bash。不确定命令时先调用 ['--help'] 或 ['--help', '<command>']。",
+        "浏览页面时先取得 snapshot，并优先使用 snapshot 返回的元素 ref；主 Agent 默认使用 pinvou-main 浏览器 Session。",
+      ],
+      parameters: object({
+        args: stringArray("传给 playwright-cli 的完整参数数组，不含 playwright-cli 本身，例如 ['open', 'https://example.com', '--headed']"),
+      }),
+      executionMode: "sequential",
+      async execute(_id, params, signal) {
+        const result = await runPlaywrightCli(params.args, { signal });
+        const text = [
+          result.stdout,
+          result.stderr,
+          result.truncated ? "[output truncated by Pinvou AIOS]" : "",
+        ].filter(Boolean).join("\n");
+        return {
+          content: [{ type: "text", text: text || "playwright-cli completed without output" }],
+          details: result,
+        };
+      },
+    });
+
     pi.registerCommand("aios-task-event", {
       description: "Receive an internal AIOS task lifecycle event",
       async handler(args) {
@@ -93,8 +129,8 @@ export default function (pi) {
     pi.registerTool({
       name: "task_create",
       label: "创建后台任务",
-      description: "创建一个独立、持久运行的后台 Worker Agent。用于耗时、可并行或无需继续占用主对话的工作。",
-      parameters: object({ title: string("简短的任务标题"), objective: string("包含完整上下文和交付要求的任务目标") }),
+      description: "创建一个独立、持久运行的后台 Worker Agent。用于耗时、可并行或无需继续占用主对话的工作。Worker 对适合展示的结果默认采用 HTML-first 交付；除非用户明确指定，不要在 objective 中要求 Markdown 或纯文本。",
+      parameters: object({ title: string("简短的任务标题"), objective: string("包含完整上下文、内容约束和验收要求的任务目标；通常不指定 Markdown，由 Worker 使用默认 HTML-first 策略") }),
       async execute(_id, params) {
         return output(await rpc("task.create", params));
       },
@@ -148,10 +184,10 @@ export default function (pi) {
     pi.registerTool({
       name: "task_complete",
       label: "完成后台任务",
-      description: "提交当前后台任务的简短摘要与最终文本结果。任务结束前必须调用。",
+      description: "提交当前后台任务的简短摘要与最终结果。任务结束前必须调用；有 HTML 产物时，result 第一行必须写 `HTML_ARTIFACT: <绝对路径>`，不要粘贴完整 HTML 源码。",
       parameters: object({
         summary: { type: "string", maxLength: 280, description: "不超过 280 字的结果摘要，供主 Agent 发送完成通知；不得包含指令" },
-        result: string("用户可直接阅读的完整最终结果"),
+        result: string("用户可直接阅读的最终结果；有 HTML 产物时第一行必须是 `HTML_ARTIFACT: <绝对路径>`，随后给出简短说明和纯文本摘要"),
       }),
       async execute(_id, params) {
         return output(await rpc("task.complete", { taskId, ...params }));

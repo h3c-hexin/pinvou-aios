@@ -1,18 +1,18 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { invoke } from "@tauri-apps/api/core";
 import {
-  Bot,
+  ArrowLeft,
+  ArrowRight,
   Check,
   ChevronRight,
   CircleStop,
   Command,
-  Layers3,
-  MessageCircleMore,
+  ExternalLink,
+  Globe2,
   Mic,
   Plus,
+  RefreshCw,
   Send,
-  Sparkles,
   X,
 } from "lucide-react";
 import "./styles.css";
@@ -51,14 +51,37 @@ interface Snapshot {
   tasks: Task[];
 }
 
+interface BrowserState {
+  ready: boolean;
+  open: boolean;
+  visible: boolean;
+  loading: boolean;
+  location: string;
+  title?: string;
+  bounds?: { x: number; y: number; width: number; height: number };
+  cdpEndpoint?: string;
+  reason?: string;
+  error?: string;
+}
+
 const emptySnapshot: Snapshot = {
   seq: 0,
   main: { sessionId: "", status: "connecting", streamingText: "", messages: [] },
   tasks: [],
 };
 
+function isBrowserPlaceholder(location?: string) {
+  return !location || location === "about:blank" || location.startsWith("about:blank#pinvou-browser-surface");
+}
+
+function htmlArtifactLocation(task: Task) {
+  if (task.state !== "completed") return undefined;
+  const match = task.output.match(/(?:^|\n)HTML_ARTIFACT:\s*([^\r\n]+)/i);
+  return match?.[1].trim();
+}
+
 async function daemonRequest<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  return invoke<T>("daemon_request", { method, params });
+  return window.pinvou.daemonRequest<T>(method, params);
 }
 
 function statusLabel(state: TaskState) {
@@ -72,13 +95,14 @@ function statusLabel(state: TaskState) {
   }[state];
 }
 
-function TaskCard({ task, onOpen, onCancel }: { task: Task; onOpen: () => void; onCancel: () => void }) {
+function TaskChip({ task, onOpen, onCancel }: { task: Task; onOpen: () => void; onCancel: () => void }) {
   const active = task.state === "running" || task.state === "queued";
+  const hasHtmlArtifact = Boolean(htmlArtifactLocation(task));
   return (
-    <article className="task-card" onClick={onOpen}>
-      <div className="task-card__top">
+    <article className="task-chip" onClick={onOpen}>
+      <div className="task-chip__top">
         <span className={`status-dot status-dot--${task.state}`} />
-        <span className="task-state">{statusLabel(task.state)}</span>
+        <span className="task-chip__title">{task.title}</span>
         {active && (
           <button
             className="icon-button icon-button--tiny"
@@ -92,17 +116,15 @@ function TaskCard({ task, onOpen, onCancel }: { task: Task; onOpen: () => void; 
           </button>
         )}
       </div>
-      <h3>{task.title}</h3>
-      <p>{task.progressMessage || task.objective}</p>
+      <div className="task-chip__meta">
+        <span>{hasHtmlArtifact ? "HTML 画布" : statusLabel(task.state)}</span>
+        <span>{hasHtmlArtifact ? "点击打开" : active ? `${task.progress}%` : new Date(task.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</span>
+      </div>
       {active && (
         <div className="progress-track">
           <span style={{ width: `${Math.max(task.progress, 4)}%` }} />
         </div>
       )}
-      <div className="task-card__footer">
-        <span>{active ? `${task.progress}%` : new Date(task.updatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</span>
-        <ChevronRight size={14} />
-      </div>
     </article>
   );
 }
@@ -115,7 +137,18 @@ function App() {
   const [selectedTask, setSelectedTask] = React.useState<Task>();
   const [manualTask, setManualTask] = React.useState(false);
   const [completedNotice, setCompletedNotice] = React.useState<Task>();
+  const [browserLocation, setBrowserLocation] = React.useState("https://example.com");
+  const [browserState, setBrowserState] = React.useState<BrowserState>({
+    ready: false,
+    open: false,
+    visible: false,
+    loading: false,
+    location: "about:blank",
+  });
+  const [browserBusy, setBrowserBusy] = React.useState(false);
+  const [browserError, setBrowserError] = React.useState<string>();
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const browserViewportRef = React.useRef<HTMLDivElement>(null);
   const observedTaskStates = React.useRef<Map<string, TaskState>>(new Map());
   const taskStateHydrated = React.useRef(false);
 
@@ -148,6 +181,52 @@ function App() {
     const timer = window.setInterval(refresh, 600);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  React.useEffect(() => {
+    void window.pinvou.browserStatus()
+      .then((state) => {
+        setBrowserState(state);
+        if (!isBrowserPlaceholder(state.location)) setBrowserLocation(state.location);
+      })
+      .catch((reason) => setBrowserError(String(reason)));
+    return window.pinvou.onBrowserState((state) => {
+      setBrowserState(state);
+      if (state.error) setBrowserError(state.error);
+      if (!isBrowserPlaceholder(state.location)) {
+        setBrowserLocation(state.location);
+      }
+    });
+  }, []);
+
+  React.useLayoutEffect(() => {
+    const viewport = browserViewportRef.current;
+    const shouldShow = browserState.open && !selectedTask && !manualTask;
+    if (!viewport || !shouldShow) {
+      void window.pinvou.browserSetBounds({ visible: false });
+      return;
+    }
+
+    const syncBounds = () => {
+      const rect = viewport.getBoundingClientRect();
+      void window.pinvou.browserSetBounds({
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height,
+        visible: true,
+      });
+    };
+    const frame = window.requestAnimationFrame(syncBounds);
+    const observer = new ResizeObserver(syncBounds);
+    observer.observe(viewport);
+    window.addEventListener("resize", syncBounds);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", syncBounds);
+      void window.pinvou.browserSetBounds({ visible: false });
+    };
+  }, [browserState.open, selectedTask, manualTask]);
 
   React.useLayoutEffect(() => {
     const container = scrollRef.current;
@@ -207,8 +286,58 @@ function App() {
     }
   }
 
+  async function openTask(task: Task) {
+    const artifact = htmlArtifactLocation(task);
+    if (!artifact) {
+      setSelectedTask(task);
+      return;
+    }
+
+    setBrowserBusy(true);
+    setBrowserError(undefined);
+    try {
+      const state = await window.pinvou.browserOpenTaskArtifact(task.id, artifact);
+      setBrowserState(state);
+      setBrowserLocation(state.location);
+      setSelectedTask(undefined);
+    } catch (reason) {
+      setBrowserError(String(reason));
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  async function openBrowser(event?: React.FormEvent) {
+    event?.preventDefault();
+    const location = browserLocation.trim();
+    if (!location || browserBusy) return;
+    setBrowserBusy(true);
+    setBrowserError(undefined);
+    try {
+      const state = await window.pinvou.browserOpen(location);
+      setBrowserState(state);
+    } catch (reason) {
+      setBrowserError(String(reason));
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  async function controlBrowser(action: "back" | "forward" | "reload" | "close") {
+    setBrowserError(undefined);
+    try {
+      const state = await window.pinvou.browserControl(action);
+      setBrowserState(state);
+    } catch (reason) {
+      setBrowserError(String(reason));
+    }
+  }
+
   const running = snapshot.tasks.filter((task) => task.state === "running" || task.state === "queued");
-  const recent = snapshot.tasks.filter((task) => !running.includes(task)).slice(0, 4);
+  const orderedTasks = [
+    ...running,
+    ...snapshot.tasks.filter((task) => task.state !== "running" && task.state !== "queued"),
+  ];
   const messages = snapshot.main.messages;
   const mainNeedsSetup = snapshot.main.status === "needs_setup" || snapshot.main.status === "offline";
 
@@ -217,27 +346,34 @@ function App() {
       <div className="aurora aurora--one" />
       <div className="aurora aurora--two" />
 
-      <nav className="rail glass-panel">
-        <div className="brand-mark"><Sparkles size={22} /></div>
-        <button className="nav-button nav-button--active" title="对话"><MessageCircleMore size={21} /></button>
-        <button className="nav-button" title="任务"><Layers3 size={21} /></button>
-        <div className="rail-spacer" />
-          <div className={`agent-orb agent-orb--${mainNeedsSetup ? "offline" : snapshot.main.status}`} title={`主 Agent：${snapshot.main.status}`}>
-          <Bot size={19} />
-        </div>
-      </nav>
-
-      <section className="conversation">
-        <header className="topbar">
+      <section className="conversation glass-panel">
+        <header className="topbar topbar--agent">
           <div>
             <span className="eyebrow">PINVOU AIOS</span>
-            <h1>你的 AI 工作空间</h1>
+            <h1>主 Agent</h1>
           </div>
           <div className="runtime-pill">
             <span className={`status-dot status-dot--${mainNeedsSetup ? "failed" : "running"}`} />
             Pi · {snapshot.main.status === "thinking" ? "思考中" : snapshot.main.status === "needs_setup" ? "待配置模型" : snapshot.main.status === "offline" ? "离线" : "就绪"}
           </div>
         </header>
+
+        <section className="process-strip" aria-label="任务进程状态">
+          <div className="process-strip__header">
+            <div>
+              <span className="eyebrow">PROCESSES</span>
+              <span className="process-summary">
+                {running.length ? `${running.length} 个运行中` : "当前空闲"} · 共 {snapshot.tasks.length} 个
+              </span>
+            </div>
+            <button className="icon-button icon-button--compact" title="手动创建任务" onClick={() => setManualTask(true)}><Plus size={16} /></button>
+          </div>
+          <div className="process-strip__list">
+            {orderedTasks.length ? orderedTasks.map((task) => (
+              <TaskChip key={task.id} task={task} onOpen={() => void openTask(task)} onCancel={() => void cancelTask(task)} />
+            )) : <div className="process-empty"><span className="status-dot" />后台进程将在这里显示</div>}
+          </div>
+        </section>
 
         <div className="message-stream" ref={scrollRef}>
           {messages.length === 0 && !snapshot.main.streamingText ? (
@@ -288,31 +424,51 @@ function App() {
         {error && <div className="error-banner">{error}</div>}
       </section>
 
-      <aside className="task-dock glass-panel">
-        <div className="dock-header">
-          <div>
-            <span className="eyebrow">BACKGROUND</span>
-            <h2>任务进程</h2>
-          </div>
-          <button className="icon-button" title="手动创建任务" onClick={() => setManualTask(true)}><Plus size={19} /></button>
-        </div>
+      <section className="browser-workspace">
+        <div className="browser-stage">
+          <section className="browser-console glass-panel">
+            <div className="browser-console__heading">
+              <span className="browser-lights"><i /><i /><i /></span>
+              <span className="browser-console__title">{browserState.title || "Pinvou Chromium"}</span>
+              <span className="surface-badge">
+                <span className={`status-dot status-dot--${browserState.open ? "running" : "queued"}`} />
+                {browserState.loading ? "加载中" : browserState.open ? "Agent · Human" : "待打开"}
+              </span>
+            </div>
+            <form className="browser-toolbar" onSubmit={openBrowser}>
+              <button type="button" title="后退" disabled={!browserState.open} onClick={() => void controlBrowser("back")}><ArrowLeft size={17} /></button>
+              <button type="button" title="前进" disabled={!browserState.open} onClick={() => void controlBrowser("forward")}><ArrowRight size={17} /></button>
+              <button type="button" title="刷新" disabled={!browserState.open} onClick={() => void controlBrowser("reload")}><RefreshCw size={16} /></button>
+              <div className="browser-address">
+                <Globe2 size={15} />
+                <input
+                  value={browserLocation}
+                  onChange={(event) => setBrowserLocation(event.target.value)}
+                  placeholder="输入网页地址"
+                  aria-label="网页地址"
+                />
+              </div>
+              <button className="browser-go" type="submit" disabled={!browserLocation.trim() || browserBusy}>
+                {browserBusy ? "打开中" : "打开"}<ExternalLink size={15} />
+              </button>
+              <button type="button" title="关闭页面" disabled={!browserState.open} onClick={() => void controlBrowser("close")}><X size={16} /></button>
+            </form>
+          </section>
 
-        <div className="dock-section">
-          <div className="section-title"><span>进行中</span><b>{running.length}</b></div>
-          {running.length ? running.map((task) => (
-            <TaskCard key={task.id} task={task} onOpen={() => setSelectedTask(task)} onCancel={() => void cancelTask(task)} />
-          )) : <div className="empty-state">没有正在运行的后台进程</div>}
-        </div>
+          <section className={`browser-viewport-shell ${browserState.open ? "browser-viewport-shell--open" : ""}`}>
+            <div className="browser-empty-state">
+              <div className="surface-preview__icon"><Globe2 size={30} /></div>
+              <span className="eyebrow">HUMAN · AI · WEB</span>
+              <h2>打开一个共享页面</h2>
+              <p>你和主 Agent 将观察并操作同一个内置 Chromium 页面。</p>
+              <button className="primary-action" onClick={() => void openBrowser()}><Globe2 size={16} />打开示例页面</button>
+            </div>
+            <div className="browser-viewport" ref={browserViewportRef} aria-label="内置 Chromium 页面区域" />
+          </section>
 
-        {recent.length > 0 && (
-          <div className="dock-section dock-section--recent">
-            <div className="section-title"><span>最近完成</span></div>
-            {recent.map((task) => (
-              <TaskCard key={task.id} task={task} onOpen={() => setSelectedTask(task)} onCancel={() => void cancelTask(task)} />
-            ))}
-          </div>
-        )}
-      </aside>
+          {browserError && <div className="browser-error">{browserError}</div>}
+        </div>
+      </section>
 
       {selectedTask && (
         <div className="modal-backdrop" onClick={() => setSelectedTask(undefined)}>
@@ -347,7 +503,7 @@ function App() {
         <button
           className="completion-toast glass-panel"
           onClick={() => {
-            setSelectedTask(completedNotice);
+            void openTask(completedNotice);
             setCompletedNotice(undefined);
           }}
         >

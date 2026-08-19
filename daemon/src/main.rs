@@ -27,6 +27,7 @@ struct Config {
     socket: PathBuf,
     pi_bin: PathBuf,
     extension: PathBuf,
+    playwright_cli: PathBuf,
     main_prompt: String,
     worker_prompt: String,
     provider: Option<String>,
@@ -52,6 +53,7 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| project.join("../pi/pi-test.sh"));
         let extension = project.join("extensions/aios-runtime.js");
+        let playwright_cli = project.join("browser/node_modules/.bin/playwright-cli");
         let main_prompt = fs::read_to_string(project.join("profiles/main.md"))?;
         let worker_prompt = fs::read_to_string(project.join("profiles/worker.md"))?;
 
@@ -60,6 +62,7 @@ impl Config {
             socket,
             pi_bin,
             extension,
+            playwright_cli,
             main_prompt,
             worker_prompt,
             provider: env::var("PINVOU_PI_PROVIDER").ok(),
@@ -540,7 +543,7 @@ async fn spawn_pi(
         AgentTarget::Main => (
             "main",
             context.config.main_prompt.clone(),
-            "task_create,task_list,task_status,task_cancel",
+            "playwright_cli,task_create,task_list,task_status,task_cancel",
             context.config.root.join("workspaces/main"),
         ),
         AgentTarget::Task(id) => (
@@ -588,6 +591,12 @@ async fn spawn_pi(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if matches!(&target, AgentTarget::Main) {
+        command
+            .env("PINVOU_PLAYWRIGHT_CLI", &context.config.playwright_cli)
+            .env("PLAYWRIGHT_CLI_SESSION", "pinvou-main")
+            .env("PLAYWRIGHT_MCP_HEADLESS", "false");
+    }
     if let AgentTarget::Task(id) = &target {
         command.env("PINVOU_TASK_ID", id);
     }

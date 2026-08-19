@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "electron": "node electron/launcher.mjs",
+    "start": "npm run build && npm run electron",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -19,8 +21,8 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "electron": "43.4.1",
     "typescript": "^5.7.0",
     "vite": "^6.0.0"
   }
 }
-

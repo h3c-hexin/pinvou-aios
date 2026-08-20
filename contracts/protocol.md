@@ -30,7 +30,10 @@
 - `task.progress`：`{ "taskId": "...", "message": "...", "percent": 30 }`
 - `task.complete`：`{ "taskId": "...", "result": "..." }`
 - `task.cancel`：`{ "taskId": "..." }`
+- `surface.activate`：`{ "contextId": "...", "taskId": "...", "artifactPath": "..." }`，将当前任务 HTML 绑定到主 Agent 对话上下文
+- `surface.deactivate`：`{ "contextId": "..." }`，仅在 contextId 仍匹配时解除当前产物上下文；省略 contextId 可清理陈旧上下文
 - `surface.modify`：`{ "taskId": "...", "artifactPath": "...", "instruction": "...", "selection": { ... } }`
+- `artifact.modify_current`：`{ "instruction": "..." }`，由主 Agent 修改当前绑定的完整 HTML 画布；守护进程自动定位产物、保存版本并恢复原 Worker Session
 - `surface.undo`：`{ "taskId": "...", "artifactPath": "..." }`
 
 语音输入产生轻量事件，避免客户端轮询完整快照：

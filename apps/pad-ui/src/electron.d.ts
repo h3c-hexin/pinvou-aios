@@ -1,6 +1,6 @@
 export {};
 
-type BrowserAction = "back" | "forward" | "reload" | "close";
+type BrowserAction = "back" | "forward" | "reload" | "close" | "return";
 
 interface PinvouBrowserState {
   ready: boolean;
@@ -16,6 +16,8 @@ interface PinvouBrowserState {
   editable?: boolean;
   editMode?: boolean;
   taskId?: string;
+  canReturn?: boolean;
+  contextDepth?: number;
   selection?: PinvouSurfaceSelection;
 }
 

@@ -8,6 +8,7 @@ import {
   CircleStop,
   Command,
   ExternalLink,
+  FileText,
   Globe2,
   LoaderCircle,
   Mic,
@@ -55,6 +56,14 @@ interface Snapshot {
     messages: ChatMessage[];
   };
   tasks: Task[];
+  activeArtifact?: {
+    contextId: string;
+    taskId: string;
+    title: string;
+    artifactRef: string;
+    fileName: string;
+    taskUpdatedAt: string;
+  };
 }
 
 interface BrowserState {
@@ -71,6 +80,8 @@ interface BrowserState {
   editable?: boolean;
   editMode?: boolean;
   taskId?: string;
+  canReturn?: boolean;
+  contextDepth?: number;
   selection?: SurfaceSelection;
 }
 
@@ -651,7 +662,7 @@ function App() {
     }
   }
 
-  async function controlBrowser(action: "back" | "forward" | "reload" | "close") {
+  async function controlBrowser(action: "back" | "forward" | "reload" | "close" | "return") {
     setBrowserError(undefined);
     try {
       const state = await window.pinvou.browserControl(action);
@@ -826,6 +837,22 @@ function App() {
           </button>
         </form>
         <div className="composer-feedback" aria-live="polite">
+          {snapshot.activeArtifact && (
+            <div className="artifact-context-banner">
+              <FileText size={14} />
+              <span>
+                <b>当前产物</b>
+                <small>{snapshot.activeArtifact.title} · {snapshot.activeArtifact.fileName}</small>
+              </span>
+              <button
+                type="button"
+                title="返回进入任务产物前的环境"
+                onClick={() => void controlBrowser("return")}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          )}
           {voiceState !== "idle" && (
             <div className={`voice-banner voice-banner--${voiceState}`}>
               <span className="voice-level"><i /><i /><i /></span>
@@ -880,7 +907,12 @@ function App() {
               <button className="browser-go" type="submit" disabled={!browserLocation.trim() || browserBusy}>
                 {browserBusy ? "打开中" : "打开"}<ExternalLink size={15} />
               </button>
-              <button type="button" title="关闭页面" disabled={!browserState.open} onClick={() => void controlBrowser("close")}><X size={16} /></button>
+              <button
+                type="button"
+                title={browserState.canReturn ? "返回进入任务产物前的环境" : "关闭页面"}
+                disabled={!browserState.open}
+                onClick={() => void controlBrowser("close")}
+              ><X size={16} /></button>
             </form>
           </section>
 

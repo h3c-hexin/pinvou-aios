@@ -109,6 +109,13 @@ h1, h2, h3 { font-family: "Manrope", "Noto Sans SC", sans-serif; }
 .send-button { display: grid; place-items: center; width: 39px; height: 39px; border: 0; border-radius: 13px; color: #080a0e; background: var(--accent); cursor: pointer; }
 .send-button:disabled { opacity: .25; cursor: default; }
 .composer-feedback { display: grid; gap: 5px; width: calc(100% - 28px); margin: -8px auto 6px; }
+.artifact-context-banner { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid rgba(198,255,99,.14); border-radius: 10px; color: var(--accent); background: rgba(198,255,99,.055); }
+.artifact-context-banner > span { min-width: 0; }
+.artifact-context-banner b, .artifact-context-banner small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-context-banner b { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.artifact-context-banner small { margin-top: 2px; color: #aeb6c2; font-size: 10px; }
+.artifact-context-banner button { display: grid; place-items: center; width: 25px; height: 25px; padding: 0; border: 0; border-radius: 8px; color: #929aa6; background: rgba(255,255,255,.045); cursor: pointer; }
+.artifact-context-banner button:hover { color: white; background: rgba(255,255,255,.08); }
 .voice-banner, .error-banner { padding: 7px 12px; border-radius: 10px; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .voice-banner { display: flex; align-items: center; gap: 8px; color: #b5bdc9; background: rgba(198,255,99,.055); }
 .voice-banner--recording { color: #ffafb3; background: rgba(255,79,90,.07); }

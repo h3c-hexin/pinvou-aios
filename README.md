@@ -46,7 +46,11 @@ sudo chmod 4755 apps/pad-ui/node_modules/electron/dist/chrome-sandbox
 
 主 Agent 没有 `bash` 或 `read`，而是把命令参数作为数组传给 `playwright_cli`；该工具使用 `shell: false` 启动项目锁定的 CLI。默认 Session 是 `pinvou-main`。Electron 把内置 Chromium 的随机本机 CDP 端点写入 `~/.pinvou-aios/run/browser-cdp.json`，CLI 自动附着该端点；如果 UI 未运行，工具会报错而不会回退弹出外部 Chrome。页面操作、调试、网络、存储和数据命令均保留；`open` 被映射为内置页面导航，因此外部浏览器、Profile、浏览器类型和 headed/headless 等启动参数不适用于 Browser Surface。Agent 可以通过 `--help` 渐进发现命令说明。
 
-从任务卡片打开本地 HTML 后，右侧工具栏会启用“AI 修改”：开启后可点击页面元素，再用自然语言描述修改要求。选择层运行在 Browser Surface 的隔离 preload 中，不向普通网页暴露 Electron API；修改请求会恢复生成该产物的原 Worker 会话，先在任务目录的 `.aios/revisions/` 保存快照，再修改源 HTML。文件变化会自动刷新画布并尽量恢复原选择，工具栏支持逐次撤销。普通 HTTP/HTTPS 页面不能进入该编辑模式。
+从任务卡片打开本地 HTML 后，该产物会绑定为主 Agent 的当前页面上下文。用户在主对话中提到“当前页面”“这个”或“这里”时，主 Agent 会先通过 Playwright 读取共享 Browser Surface 的最新页面，再回答或继续处理；内部上下文不会写成 UI 中的普通用户消息。用户直接在主对话中要求“修改这个页面”时，主 Agent 使用 `artifact_modify_current` 将要求路由给产物所属的原 Worker Session，不创建第二个任务，也不接收或猜测文件路径。守护进程会先在任务目录的 `.aios/revisions/` 保存快照，再修改源 HTML；同一任务的每次完成都能产生独立通知。
+
+右侧工具栏也保留元素级“AI 修改”：开启后可点击页面元素，再用自然语言描述修改要求。选择层运行在 Browser Surface 的隔离 preload 中，不向普通网页暴露 Electron API；文件变化会自动刷新画布并尽量恢复原选择，工具栏支持逐次撤销。普通 HTTP/HTTPS 页面不能进入该编辑模式。Worker 只能把自己工作目录内的 HTML 登记为产物，跨任务目录的产物在 `task.complete` 时会被拒绝。
+
+Browser Surface 打开任务产物前会保存原浏览环境。点击返回或关闭当前任务产物时，会恢复此前的网址、打开状态和滚动位置；若此前也是另一个任务产物，则会恢复它的主 Agent 上下文、元素选择和 AI 修改模式。当前最小实现通过重新导航恢复页面，因此网页中尚未持久化的动态 JS/表单状态不保证保留。
 
 例如主 Agent 可以依次调用：
 

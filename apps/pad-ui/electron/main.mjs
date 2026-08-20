@@ -45,6 +45,7 @@ let browserLoading = false;
 let browserTitle = "";
 let browserBounds = { x: 0, y: 0, width: 0, height: 0 };
 let currentTaskArtifact;
+let browserReturnStack = [];
 let surfaceEditMode = false;
 let surfaceSelection;
 let artifactWatcher;
@@ -125,6 +126,8 @@ function browserState(extra = {}) {
     editable: Boolean(currentTaskArtifact),
     editMode: surfaceEditMode,
     taskId: currentTaskArtifact?.taskId,
+    canReturn: browserReturnStack.length > 0,
+    contextDepth: browserReturnStack.length,
     selection: surfaceSelection
       ? { taskId: currentTaskArtifact?.taskId, ...surfaceSelection }
       : undefined,
@@ -184,12 +187,104 @@ function watchCurrentArtifact() {
   });
 }
 
-function clearTaskArtifact() {
+function clearTaskArtifact({ notifyDaemon = true } = {}) {
+  const previous = currentTaskArtifact;
   stopArtifactWatcher();
   currentTaskArtifact = undefined;
   surfaceEditMode = false;
   surfaceSelection = undefined;
   sendSurfaceSelection();
+  if (notifyDaemon && previous?.contextId) {
+    void daemonRequest("surface.deactivate", { contextId: previous.contextId }).catch((error) => {
+      console.warn("[pinvou-aios] failed to deactivate artifact context", error.message);
+    });
+  }
+}
+
+async function activateCurrentTaskArtifact() {
+  if (!currentTaskArtifact) return undefined;
+  return daemonRequest("surface.activate", {
+    contextId: currentTaskArtifact.contextId,
+    taskId: currentTaskArtifact.taskId,
+    artifactPath: currentTaskArtifact.path,
+  });
+}
+
+async function captureBrowserEnvironment() {
+  const location = browserView && !browserView.webContents.isDestroyed()
+    ? browserView.webContents.getURL()
+    : "about:blank#pinvou-browser-surface";
+  let scroll = { x: 0, y: 0 };
+  if (browserOpen && hasBrowserContent(location)) {
+    scroll = await browserView.webContents.executeJavaScript(
+      "({ x: Math.round(window.scrollX || 0), y: Math.round(window.scrollY || 0) })",
+      true,
+    ).catch(() => scroll);
+  }
+  return {
+    open: browserOpen,
+    location,
+    title: browserTitle,
+    scroll,
+    artifact: currentTaskArtifact
+      ? {
+          taskId: currentTaskArtifact.taskId,
+          path: currentTaskArtifact.path,
+          target: currentTaskArtifact.target,
+        }
+      : undefined,
+    editMode: surfaceEditMode,
+    selection: surfaceSelection ? structuredClone(surfaceSelection) : undefined,
+  };
+}
+
+async function restoreBrowserEnvironment() {
+  const environment = browserReturnStack.pop();
+  clearTaskArtifact();
+  if (!environment) {
+    browserOpen = false;
+    browserVisible = false;
+    browserTitle = "";
+    applyBrowserVisibility();
+    return sendBrowserState({ reason: "closed" });
+  }
+
+  if (!environment.open || !hasBrowserContent(environment.location)) {
+    browserOpen = false;
+    browserTitle = environment.title || "";
+    await browserView.webContents.loadURL("about:blank#pinvou-browser-surface");
+    applyBrowserVisibility();
+    return sendBrowserState({ reason: "context-restored" });
+  }
+
+  browserOpen = true;
+  applyBrowserVisibility();
+  await browserView.webContents.loadURL(environment.location);
+  browserTitle = environment.title || browserTitle;
+  await browserView.webContents.executeJavaScript(
+    `window.scrollTo(${Math.round(environment.scroll?.x || 0)}, ${Math.round(environment.scroll?.y || 0)})`,
+    true,
+  ).catch(() => undefined);
+
+  if (environment.artifact) {
+    currentTaskArtifact = {
+      ...environment.artifact,
+      contextId: crypto.randomUUID(),
+    };
+    surfaceEditMode = Boolean(environment.editMode);
+    surfaceSelection = environment.selection;
+    watchCurrentArtifact();
+    await activateCurrentTaskArtifact();
+    if (surfaceEditMode) {
+      browserView.webContents.send("surface:edit-mode", {
+        enabled: true,
+        restoreSelector: surfaceSelection?.selector,
+      });
+    }
+    sendSurfaceSelection();
+  }
+  applyBrowserVisibility();
+  return sendBrowserState({ reason: "context-restored" });
 }
 
 function isCurrentTaskArtifact(location) {
@@ -529,18 +624,33 @@ function registerIpc() {
   });
   ipcMain.handle("browser:open-task-artifact", async (event, { taskId, location }) => {
     trusted(event);
+    const environment = await captureBrowserEnvironment();
+    browserReturnStack.push(environment);
     clearTaskArtifact();
-    currentTaskArtifact = normalizeTaskArtifactLocation(taskId, location);
+    currentTaskArtifact = {
+      ...normalizeTaskArtifactLocation(taskId, location),
+      contextId: crypto.randomUUID(),
+    };
     watchCurrentArtifact();
     browserOpen = true;
     applyBrowserVisibility();
-    await browserView.webContents.loadURL(currentTaskArtifact.target);
-    return sendBrowserState({ reason: "task-artifact" });
+    try {
+      await browserView.webContents.loadURL(currentTaskArtifact.target);
+      await activateCurrentTaskArtifact();
+      return sendBrowserState({ reason: "task-artifact" });
+    } catch (error) {
+      clearTaskArtifact();
+      await restoreBrowserEnvironment();
+      throw error;
+    }
   });
   ipcMain.handle("browser:control", async (event, { action }) => {
     trusted(event);
     switch (action) {
       case "back":
+        if (currentTaskArtifact && browserReturnStack.length > 0) {
+          return restoreBrowserEnvironment();
+        }
         if (browserView.webContents.navigationHistory.canGoBack()) browserView.webContents.navigationHistory.goBack();
         break;
       case "forward":
@@ -550,8 +660,13 @@ function registerIpc() {
         browserView.webContents.reload();
         break;
       case "close":
+      case "return":
+        if (browserReturnStack.length > 0) {
+          return restoreBrowserEnvironment();
+        }
         browserOpen = false;
         browserVisible = false;
+        browserTitle = "";
         clearTaskArtifact();
         applyBrowserVisibility();
         break;
@@ -645,11 +760,22 @@ async function createMainWindow() {
   const developmentUrl = process.env.PINVOU_AIOS_UI_DEV_URL;
   if (developmentUrl) await uiView.webContents.loadURL(developmentUrl);
   else await uiView.webContents.loadFile(path.join(appDirectory, "dist", "index.html"));
+  await daemonRequest("surface.deactivate", {}).catch((error) => {
+    console.warn("[pinvou-aios] failed to clear stale artifact context", error.message);
+  });
   daemonEventStream = new DaemonEventStream({
     socketPath,
     onEvent: handleDaemonEvent,
     onState(state) {
       if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.send("daemon:event-state", state);
+      if (state.connected && currentTaskArtifact) {
+        const contextId = currentTaskArtifact.contextId;
+        void activateCurrentTaskArtifact().catch((error) => {
+          if (currentTaskArtifact?.contextId !== contextId) return;
+          console.warn("[pinvou-aios] failed to restore artifact context after daemon reconnect", error.message);
+          sendBrowserState({ error: `主 Agent 页面上下文恢复失败：${error.message}` });
+        });
+      }
     },
   });
   daemonEventStream.start();

@@ -137,6 +137,24 @@ export default function (pi) {
     });
 
     pi.registerTool({
+      name: "artifact_modify_current",
+      label: "修改当前产物",
+      description: "修改用户当前在 AIOS Browser Surface 中打开的任务 HTML。AIOS 会自动定位产物、保存修改前版本，并恢复生成它的原 Worker Session；不要传文件路径或另建任务。仅用于修改当前产物；用户明确要求另做独立版本时才使用 task_create。",
+      promptSnippet: "通过原 Worker Session 安全修改当前打开的 HTML 产物",
+      promptGuidelines: [
+        "用户要求修改当前页面、当前 HTML、这个产物或其中内容时，调用 artifact_modify_current；不要调用 task_create，也不要使用 playwright_cli 写文件。",
+        "instruction 应忠实保留用户目标和约束。调用前可用 playwright_cli snapshot 观察页面；修改由产物所属 Worker 在后台执行。",
+      ],
+      parameters: object({
+        instruction: string("对当前 HTML 产物的完整修改要求；不包含 taskId、文件路径或工具指令"),
+      }),
+      executionMode: "sequential",
+      async execute(_id, params) {
+        return output(await rpc("artifact.modify_current", params));
+      },
+    });
+
+    pi.registerTool({
       name: "task_list",
       label: "后台任务列表",
       description: "查看所有后台任务及其当前状态。",

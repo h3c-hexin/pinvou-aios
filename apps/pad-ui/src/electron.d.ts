@@ -39,6 +39,7 @@ interface PinvouBridge {
     mimeType: string,
     sampleRate?: number,
   ): Promise<{ text: string; requestId?: string; model: string }>;
+  voiceInterruptOutput(): Promise<{ interrupted: boolean }>;
   browserStatus(): Promise<PinvouBrowserState>;
   browserOpen(location: string): Promise<PinvouBrowserState>;
   browserOpenTaskArtifact(taskId: string, location: string): Promise<PinvouBrowserState>;
@@ -56,6 +57,21 @@ interface PinvouBridge {
   surfaceUndo(): Promise<unknown>;
   onBrowserState(listener: (state: PinvouBrowserState) => void): () => void;
   onSurfaceSelection(listener: (selection?: PinvouSurfaceSelection) => void): () => void;
+  onDaemonEvent(listener: (event: {
+    type: "event";
+    event: string;
+    data?: Record<string, unknown>;
+  }) => void): () => void;
+  onVoiceAudio(listener: (chunk: { audio: Uint8Array; sampleRate: number }) => void): () => void;
+  onVoiceClearAudio(listener: () => void): () => void;
+  onVoiceOutputState(listener: (state: {
+    state: "connecting" | "speaking" | "finished" | "stopped" | "disabled" | "error" | "fallback";
+    error?: string;
+    model?: string;
+    voice?: string;
+  }) => void): () => void;
+  onVoiceFallback(listener: (value: { text: string }) => void): () => void;
+  onVoiceCancelFallback(listener: () => void): () => void;
 }
 
 declare global {

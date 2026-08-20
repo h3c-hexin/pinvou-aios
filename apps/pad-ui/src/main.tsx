@@ -14,12 +14,14 @@ import {
   MousePointer2,
   Plus,
   RefreshCw,
+  Radio,
   Send,
   Sparkles,
   Undo2,
   X,
 } from "lucide-react";
 import "./styles.css";
+import { ContinuousVoiceCapture, type ContinuousVoiceState, PcmAudioPlayer } from "./voice-runtime";
 
 type TaskState = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
@@ -85,7 +87,8 @@ interface SurfaceSelection {
   styles: Record<string, string>;
 }
 
-type VoiceState = "idle" | "requesting" | "recording" | "recognizing";
+type VoiceState = "idle" | "requesting" | "recording" | "recognizing" | "listening" | "hearing";
+type VoiceMode = "push" | "continuous";
 
 const maximumVoiceRecordingMs = 120_000;
 
@@ -201,6 +204,8 @@ function App() {
   const [surfaceBusy, setSurfaceBusy] = React.useState(false);
   const [surfaceFeedback, setSurfaceFeedback] = React.useState<string>();
   const [voiceState, setVoiceState] = React.useState<VoiceState>("idle");
+  const [voiceMode, setVoiceMode] = React.useState<VoiceMode>("push");
+  const [voiceOutputState, setVoiceOutputState] = React.useState<string>("idle");
   const [voiceError, setVoiceError] = React.useState<string>();
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const browserViewportRef = React.useRef<HTMLDivElement>(null);
@@ -212,6 +217,9 @@ function App() {
   const voiceRecordingTimerRef = React.useRef<number | undefined>(undefined);
   const voiceCancelledRef = React.useRef(false);
   const voiceMountedRef = React.useRef(true);
+  const voiceCaptureRef = React.useRef<ContinuousVoiceCapture | undefined>(undefined);
+  const voicePlayerRef = React.useRef(new PcmAudioPlayer());
+  const voiceStreamTextRef = React.useRef("");
 
   const refresh = React.useCallback(async () => {
     try {
@@ -267,6 +275,60 @@ function App() {
   }), []);
 
   React.useEffect(() => {
+    const removeEvent = window.pinvou.onDaemonEvent((event) => {
+      if (event.event === "snapshot.changed") void refresh();
+      if (event.event === "main.turn.started") {
+        voiceStreamTextRef.current = "";
+      }
+      if (event.event === "main.turn.delta") {
+        const delta = typeof event.data?.delta === "string" ? event.data.delta : "";
+        if (delta) {
+          voiceStreamTextRef.current += delta;
+          setSnapshot((current) => ({
+            ...current,
+            main: { ...current.main, streamingText: voiceStreamTextRef.current },
+          }));
+        }
+      }
+      if (["main.turn.completed", "main.turn.failed", "main.turn.interrupted"].includes(event.event)) {
+        voiceStreamTextRef.current = "";
+        void refresh();
+      }
+    });
+    const removeAudio = window.pinvou.onVoiceAudio(({ audio, sampleRate }) => {
+      void voicePlayerRef.current.push(audio, sampleRate).catch((reason) => {
+        setVoiceError(voiceFailureMessage(reason));
+      });
+    });
+    const removeClear = window.pinvou.onVoiceClearAudio(() => voicePlayerRef.current.clear());
+    const removeOutputState = window.pinvou.onVoiceOutputState((state) => {
+      setVoiceOutputState(state.state);
+      if (state.state === "error" && state.error) setVoiceError(state.error);
+    });
+    const removeFallback = window.pinvou.onVoiceFallback(({ text }) => {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "zh-CN";
+      utterance.rate = 1.05;
+      const voices = window.speechSynthesis.getVoices();
+      utterance.voice = voices.find((voice) => voice.lang.toLowerCase().startsWith("zh")) || null;
+      utterance.onstart = () => setVoiceOutputState("fallback");
+      utterance.onend = () => setVoiceOutputState("finished");
+      utterance.onerror = () => setVoiceError("云端 TTS 暂不可用，本机也没有可用的中文语音");
+      window.speechSynthesis.speak(utterance);
+    });
+    const removeCancelFallback = window.pinvou.onVoiceCancelFallback(() => window.speechSynthesis.cancel());
+    return () => {
+      removeEvent();
+      removeAudio();
+      removeClear();
+      removeOutputState();
+      removeFallback();
+      removeCancelFallback();
+    };
+  }, [refresh]);
+
+  React.useEffect(() => {
     voiceMountedRef.current = true;
     return () => {
       voiceMountedRef.current = false;
@@ -275,6 +337,8 @@ function App() {
       const recorder = voiceRecorderRef.current;
       if (recorder && recorder.state !== "inactive") recorder.stop();
       voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
+      void voiceCaptureRef.current?.stop();
+      void voicePlayerRef.current.close();
     };
   }, []);
 
@@ -342,6 +406,37 @@ function App() {
     }
   }
 
+  async function waitForMainIdle(maximumMs = 8_000) {
+    const deadline = Date.now() + maximumMs;
+    while (Date.now() < deadline) {
+      const current = await daemonRequest<Snapshot>("snapshot.get");
+      if (current.main.status === "idle") return;
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    throw new Error("主 Agent 未能及时停止上一轮对话");
+  }
+
+  async function submitVoiceTranscript(transcript: string) {
+    const message = transcript.trim();
+    if (!message) return;
+    const current = await daemonRequest<Snapshot>("snapshot.get");
+    if (current.main.status !== "idle") {
+      await daemonRequest("main.interrupt");
+      await waitForMainIdle();
+    }
+    await daemonRequest("main.voice_prompt", {
+      message,
+      turnId: `voice:${crypto.randomUUID()}`,
+    });
+    await refresh();
+  }
+
+  async function recognizeAndSubmit(audio: ArrayBuffer, mimeType: string, sampleRate?: number) {
+    const result = await window.pinvou.voiceRecognize(audio, mimeType, sampleRate);
+    await submitVoiceTranscript(result.text);
+    setVoiceError(undefined);
+  }
+
   function stopVoiceRecording() {
     const recorder = voiceRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
@@ -354,6 +449,8 @@ function App() {
     setVoiceError(undefined);
     setVoiceState("requesting");
     try {
+      voicePlayerRef.current.clear();
+      await window.pinvou.voiceInterruptOutput();
       if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
         throw new Error("当前系统不支持麦克风录音");
       }
@@ -416,13 +513,11 @@ function App() {
         setVoiceState("recognizing");
         try {
           const sampleRate = stream.getAudioTracks()[0]?.getSettings().sampleRate;
-          const result = await window.pinvou.voiceRecognize(
+          await recognizeAndSubmit(
             await audio.arrayBuffer(),
             mimeType,
             sampleRate,
           );
-          setInput((current) => appendTranscript(current, result.text));
-          setVoiceError(undefined);
         } catch (reason) {
           setVoiceError(voiceFailureMessage(reason));
         } finally {
@@ -446,8 +541,53 @@ function App() {
   }
 
   function toggleVoiceRecording() {
+    if (voiceMode === "continuous") {
+      if (voiceCaptureRef.current) void stopContinuousVoice();
+      else void startContinuousVoice();
+      return;
+    }
     if (voiceState === "recording") stopVoiceRecording();
     else if (voiceState === "idle") void startVoiceRecording();
+  }
+
+  async function startContinuousVoice() {
+    if (voiceCaptureRef.current) return;
+    setVoiceError(undefined);
+    const capture = new ContinuousVoiceCapture({
+      onState(state: ContinuousVoiceState) {
+        if (state === "off") setVoiceState("idle");
+        else setVoiceState(state);
+      },
+      async onSpeechStart() {
+        voicePlayerRef.current.clear();
+        await window.pinvou.voiceInterruptOutput();
+      },
+      async onUtterance(audio) {
+        await recognizeAndSubmit(audio, "audio/wav", 16_000);
+      },
+      onError(reason) {
+        setVoiceError(voiceFailureMessage(reason));
+      },
+    });
+    voiceCaptureRef.current = capture;
+    try {
+      await capture.start();
+    } catch {
+      voiceCaptureRef.current = undefined;
+      setVoiceState("idle");
+    }
+  }
+
+  async function stopContinuousVoice() {
+    const capture = voiceCaptureRef.current;
+    voiceCaptureRef.current = undefined;
+    await capture?.stop();
+    setVoiceState("idle");
+  }
+
+  async function changeVoiceMode() {
+    if (voiceCaptureRef.current) await stopContinuousVoice();
+    setVoiceMode((current) => current === "push" ? "continuous" : "push");
   }
 
   async function createTask(event: React.FormEvent<HTMLFormElement>) {
@@ -645,15 +785,25 @@ function App() {
 
         <form className="composer glass-panel" onSubmit={sendMessage}>
           <button
+            className={`voice-mode-toggle ${voiceMode === "continuous" ? "voice-mode-toggle--active" : ""}`}
+            type="button"
+            title={voiceMode === "push" ? "切换到连续对话" : "切换到单次对话"}
+            onClick={() => void changeVoiceMode()}
+          >
+            <Radio size={13} />{voiceMode === "continuous" ? "连续" : "单次"}
+          </button>
+          <button
             className={`icon-button voice-button voice-button--${voiceState}`}
             type="button"
-            title={voiceState === "recording" ? "点击停止并识别" : voiceState === "idle" ? "点击开始语音输入" : "正在处理语音"}
+            title={voiceMode === "continuous"
+              ? voiceState === "idle" ? "开始连续语音对话" : "停止连续语音对话"
+              : voiceState === "recording" ? "点击停止并识别" : voiceState === "idle" ? "点击开始单次语音对话" : "正在处理语音"}
             aria-label={voiceState === "recording" ? "停止录音" : "开始语音输入"}
             aria-pressed={voiceState === "recording"}
-            disabled={sending || (voiceState !== "idle" && voiceState !== "recording")}
+            disabled={sending || (voiceMode === "push" && voiceState !== "idle" && voiceState !== "recording")}
             onClick={toggleVoiceRecording}
           >
-            {voiceState === "recording"
+            {voiceState === "recording" || voiceState === "hearing"
               ? <CircleStop size={20} />
               : voiceState === "requesting" || voiceState === "recognizing"
                 ? <LoaderCircle className="spin" size={20} />
@@ -681,8 +831,13 @@ function App() {
               <span className="voice-level"><i /><i /><i /></span>
               {voiceState === "requesting" && "正在请求麦克风权限…"}
               {voiceState === "recording" && "正在录音，再次点击麦克风即可停止"}
+              {voiceState === "listening" && "连续对话已开启，正在等待你说话…"}
+              {voiceState === "hearing" && "正在听，你可以随时打断 Pinvou"}
               {voiceState === "recognizing" && "千问正在识别…"}
             </div>
+          )}
+          {["speaking", "fallback"].includes(voiceOutputState) && voiceState === "idle" && (
+            <div className="voice-banner"><span className="voice-level"><i /><i /><i /></span>{voiceOutputState === "fallback" ? "Pinvou 正在使用本机语音" : "Pinvou 正在说话"}</div>
           )}
           {voiceError && <div className="error-banner">{voiceError}</div>}
           {error && <div className="error-banner">{error}</div>}

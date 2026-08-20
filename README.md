@@ -9,10 +9,12 @@
 - 主 Agent 通过扩展工具创建、查询和取消后台任务 Agent；
 - 主 Agent 通过单一 `playwright_cli` 工具使用官方 Playwright CLI 的全部命令，控制 AIOS 内置的人机共享 Chromium，同时不获得 Bash；
 - React + Electron 的 PAD 桌面壳展示主对话、后台任务和内置 Browser Surface；
-- Electron 可信 UI 支持点击录音，并通过 Token Plan 的 `qwen-audio-3.0-asr-flash` 将识别结果回填到主输入框；
+- Electron 可信 UI 提供单次与连续语音模式，通过 Token Plan 的 `qwen-audio-3.0-asr-flash` 识别后自动进入 Pi 主 Agent；
+- Pi 的语音轮次通过增量事件送入按句 TTS，优先使用 `qwen-audio-3.0-tts-plus`，云端不可用时回退本机语音；
+- 连续模式在本地做 VAD 分段，用户开口会立即停止当前播放，识别确认后中断旧的 Pi 轮次；
 - SQLite 保存任务状态，Pi 自己保存会话历史。
 
-流式语音、TTS、MCP、权限确认和业务连接器暂不在这个最小版本内。
+当前连续模式是“本地 VAD + 分句批量 ASR”，还不是服务端流式 ASR。MCP、权限确认和业务连接器暂不在这个最小版本内。
 
 ## 前置条件
 
@@ -62,13 +64,22 @@ export PINVOU_PI_PROVIDER=openai
 export PINVOU_PI_MODEL=gpt-5.2
 ```
 
-语音输入使用 Token Plan 个人版专属的 `sk-sp-` API Key。密钥只由 Electron 主进程读取，不会暴露给 React 页面或右侧 Browser Surface：
+语音输入与云端合成使用 Token Plan 个人版专属的 `sk-sp-` API Key。密钥只由 Electron 主进程读取，不会暴露给 React 页面或右侧 Browser Surface。首次通过环境变量启动后，Electron 会用操作系统安全存储加密保存密钥；若系统没有可用的加密后端，则不会落盘：
 
 ```bash
 export PINVOU_TOKEN_PLAN_API_KEY='sk-sp-...'
 ```
 
-点击输入框左侧的麦克风开始录音，再次点击后停止并识别；识别文字只回填输入框，不会自动发送。单次录音上限为两分钟。Token Plan 个人版应仅按其服务条款用于个人、单设备的交互式智能体工具场景。
+“单次”模式点击麦克风开始录音，再次点击后停止、识别并自动发送给 Pi；“连续”模式会常驻收音，本地检测一句话结束后自动识别和发送。单次录音上限为两分钟，连续模式单句上限为 30 秒。只有语音发起的 Pi 轮次会被朗读，键盘输入不会突然触发 TTS。Token Plan 个人版应仅按其服务条款用于个人、单设备的交互式智能体工具场景。
+
+可选语音合成设置：
+
+```bash
+export PINVOU_TTS_VOICE=longanlingxin
+export PINVOU_TTS_WEBSOCKET_URL=wss://token-plan.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference
+```
+
+`qwen-audio-3.0-tts-plus` 的系统音色只能使用 `longanlingxin` 或 `longanlufeng`。不要混用其他 Qwen-Audio-TTS 或 CosyVoice 模型的音色，否则服务端会返回引擎错误 411。
 
 ## 运行
 
@@ -103,6 +114,8 @@ npm start
 - `PINVOU_PI_MODEL`
 - `PINVOU_PLAYWRIGHT_CLI`
 - `PINVOU_TOKEN_PLAN_API_KEY`
+- `PINVOU_TTS_VOICE`
+- `PINVOU_TTS_WEBSOCKET_URL`
 - `PLAYWRIGHT_CLI_SESSION`
 - `PLAYWRIGHT_MCP_HEADLESS`
 - `PLAYWRIGHT_MCP_CONFIG`

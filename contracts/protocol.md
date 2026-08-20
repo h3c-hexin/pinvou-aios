@@ -22,6 +22,8 @@
 
 - `snapshot.get`
 - `main.prompt`：`{ "message": "..." }`
+- `main.voice_prompt`：`{ "message": "...", "turnId": "voice:..." }`
+- `main.interrupt`：中断当前主 Agent 轮次
 - `task.create`：`{ "title": "...", "objective": "..." }`
 - `task.list`
 - `task.status`：`{ "taskId": "..." }`
@@ -30,3 +32,13 @@
 - `task.cancel`：`{ "taskId": "..." }`
 - `surface.modify`：`{ "taskId": "...", "artifactPath": "...", "instruction": "...", "selection": { ... } }`
 - `surface.undo`：`{ "taskId": "...", "artifactPath": "..." }`
+
+语音输入产生轻量事件，避免客户端轮询完整快照：
+
+- `main.turn.accepted`
+- `main.turn.started`
+- `main.turn.delta`
+- `main.turn.tool_started`
+- `main.turn.completed`
+- `main.turn.interrupted`
+- `main.turn.failed`

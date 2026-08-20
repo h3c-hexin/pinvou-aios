@@ -169,7 +169,16 @@ struct Snapshot {
 struct RuntimeState {
     seq: u64,
     main: MainAgentView,
+    voice_turn: Option<VoiceTurn>,
     tasks: HashMap<String, TaskView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceTurn {
+    id: String,
+    state: String,
+    started_at: String,
 }
 
 #[derive(Clone)]
@@ -570,6 +579,18 @@ async fn publish(context: &AppContext) {
     let _ = context.events.send(event);
 }
 
+fn emit(context: &AppContext, event: &str, data: Value) {
+    let _ = context.events.send(json!({
+        "type": "event",
+        "event": event,
+        "data": data,
+    }));
+}
+
+async fn active_voice_turn(context: &AppContext) -> Option<VoiceTurn> {
+    context.state.read().await.voice_turn.clone()
+}
+
 fn extract_text(message: &Value) -> Option<String> {
     if let Some(text) = message.get("content").and_then(Value::as_str) {
         return Some(text.to_owned());
@@ -897,9 +918,22 @@ async fn handle_pi_event(context: &AppContext, target: &AgentTarget, event: Valu
     match target {
         AgentTarget::Main => match event_type {
             "agent_start" => {
-                let mut state = context.state.write().await;
-                state.main.status = "thinking".to_owned();
-                state.main.error = None;
+                let voice_turn = {
+                    let mut state = context.state.write().await;
+                    state.main.status = "thinking".to_owned();
+                    state.main.error = None;
+                    if let Some(turn) = state.voice_turn.as_mut() {
+                        turn.state = "thinking".to_owned();
+                    }
+                    state.voice_turn.clone()
+                };
+                if let Some(turn) = voice_turn {
+                    emit(
+                        context,
+                        "main.turn.started",
+                        json!({ "turnId": turn.id, "source": "voice" }),
+                    );
+                }
             }
             "message_start" => {
                 if event.pointer("/message/role").and_then(Value::as_str) == Some("assistant") {
@@ -923,6 +957,13 @@ async fn handle_pi_event(context: &AppContext, target: &AgentTarget, event: Valu
                             .main
                             .streaming_text
                             .push_str(delta);
+                        if let Some(turn) = active_voice_turn(context).await {
+                            emit(
+                                context,
+                                "main.turn.delta",
+                                json!({ "turnId": turn.id, "delta": delta }),
+                            );
+                        }
                     }
                     // The Tauri shell polls the live snapshot. Avoid broadcasting a full
                     // snapshot for every model token; message_end publishes the final state.
@@ -939,9 +980,37 @@ async fn handle_pi_event(context: &AppContext, target: &AgentTarget, event: Valu
                     }
                 }
             }
-            "agent_settled" => context.state.write().await.main.status = "idle".to_owned(),
+            "tool_execution_start" => {
+                if let Some(turn) = active_voice_turn(context).await {
+                    emit(
+                        context,
+                        "main.turn.tool_started",
+                        json!({
+                            "turnId": turn.id,
+                            "toolName": event.get("toolName").and_then(Value::as_str),
+                        }),
+                    );
+                }
+            }
+            "agent_settled" => {
+                let completed = {
+                    let mut state = context.state.write().await;
+                    state.main.status = "idle".to_owned();
+                    state.voice_turn.take()
+                };
+                if let Some(turn) = completed {
+                    emit(context, "main.turn.completed", json!({ "turnId": turn.id }));
+                }
+            }
             "extension_error" => {
                 context.state.write().await.main.error = Some(event.to_string());
+                if let Some(turn) = active_voice_turn(context).await {
+                    emit(
+                        context,
+                        "main.turn.failed",
+                        json!({ "turnId": turn.id, "error": "Pi 扩展执行失败" }),
+                    );
+                }
             }
             _ => return,
         },
@@ -1146,6 +1215,96 @@ async fn dispatch(context: &AppContext, request: &Request) -> Result<Value> {
             )
             .await?;
             Ok(json!({ "accepted": true }))
+        }
+        "main.voice_prompt" => {
+            let message = required_string(&request.params, "message")?;
+            let requested_turn_id = request
+                .params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("voice:{}", Uuid::new_v4()));
+            let turn_id = requested_turn_id;
+            {
+                let mut state = context.state.write().await;
+                if state.main.status != "idle" || state.voice_turn.is_some() {
+                    bail!("主 Agent 正在处理上一轮，请稍候或先中断");
+                }
+                state.voice_turn = Some(VoiceTurn {
+                    id: turn_id.clone(),
+                    state: "accepted".to_owned(),
+                    started_at: now(),
+                });
+            }
+            if let Err(error) = add_main_message(context, "user", message.clone()).await {
+                let mut state = context.state.write().await;
+                if state.voice_turn.as_ref().map(|turn| turn.id.as_str()) == Some(turn_id.as_str())
+                {
+                    state.voice_turn = None;
+                }
+                return Err(error);
+            }
+            publish(context).await;
+            let voice_prompt = format!(
+                "[AIOS 语音输入]\n用户说：{message}\n\n请正常使用你的全部 AIOS 能力完成请求。面向用户的文字应自然、简洁、适合直接播报；不要朗读 Markdown 符号、长链接、代码或大段表格。需要后台执行时照常创建任务，只用一句口语化的话确认。"
+            );
+            if let Err(error) = send_agent(
+                context,
+                "main",
+                json!({
+                    "id": format!("main-voice-prompt:{turn_id}"),
+                    "type": "prompt",
+                    "message": voice_prompt
+                }),
+            )
+            .await
+            {
+                let mut state = context.state.write().await;
+                if state.voice_turn.as_ref().map(|turn| turn.id.as_str()) == Some(turn_id.as_str())
+                {
+                    state.voice_turn = None;
+                }
+                return Err(error);
+            }
+            emit(
+                context,
+                "main.turn.accepted",
+                json!({ "turnId": turn_id, "source": "voice" }),
+            );
+            Ok(json!({ "accepted": true, "turnId": turn_id }))
+        }
+        "main.interrupt" => {
+            let (interrupted, was_running) = {
+                let mut state = context.state.write().await;
+                let was_running = state.main.status != "idle";
+                state.main.status = "interrupting".to_owned();
+                state.main.streaming_text.clear();
+                (state.voice_turn.take(), was_running)
+            };
+            if was_running {
+                send_agent(
+                    context,
+                    "main",
+                    json!({
+                        "id": format!("main-abort:{}", Uuid::new_v4()),
+                        "type": "abort"
+                    }),
+                )
+                .await?;
+            } else {
+                context.state.write().await.main.status = "idle".to_owned();
+            }
+            if let Some(ref turn) = interrupted {
+                emit(
+                    context,
+                    "main.turn.interrupted",
+                    json!({ "turnId": turn.id }),
+                );
+            }
+            publish(context).await;
+            Ok(json!({ "interrupted": interrupted.is_some() }))
         }
         "task.create" => {
             let title = required_string(&request.params, "title")?;
@@ -1512,6 +1671,7 @@ async fn main() -> Result<()> {
                 error: None,
                 messages,
             },
+            voice_turn: None,
             tasks,
         }),
         agents: RwLock::new(HashMap::new()),

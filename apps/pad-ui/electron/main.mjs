@@ -5,9 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { app, BaseWindow, WebContentsView, ipcMain, session } from "electron";
+import { app, BaseWindow, WebContentsView, ipcMain, safeStorage, session } from "electron";
 
 import { recognizeWithTokenPlan } from "./asr.mjs";
+import { DaemonEventStream } from "./daemon-events.mjs";
+import { VoiceOutputGateway } from "./tts.mjs";
 
 const electronDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.dirname(electronDirectory);
@@ -16,6 +18,7 @@ const socketPath = process.env.PINVOU_AIOS_SOCKET || path.join(aiosHome, "run", 
 const cdpPort = Number.parseInt(process.env.PINVOU_BROWSER_CDP_PORT || "", 10);
 const cdpEndpoint = `http://127.0.0.1:${cdpPort}`;
 const cdpStatePath = path.join(aiosHome, "run", "browser-cdp.json");
+const tokenPlanCredentialPath = path.join(aiosHome, "credentials", "token-plan.enc");
 const instanceId = crypto.randomUUID();
 
 console.log(`[pinvou-aios] Electron main starting (pid=${process.pid}, cdp=${cdpEndpoint})`);
@@ -47,6 +50,57 @@ let surfaceSelection;
 let artifactWatcher;
 let artifactReloadTimer;
 let voiceRecognitionInFlight = false;
+let daemonEventStream;
+let tokenPlanApiKey;
+let voiceOutput;
+
+function loadTokenPlanCredential() {
+  const fromEnvironment = String(process.env.PINVOU_TOKEN_PLAN_API_KEY || "").trim();
+  if (fromEnvironment) {
+    if (safeStorage.isEncryptionAvailable()) {
+      fs.mkdirSync(path.dirname(tokenPlanCredentialPath), { recursive: true, mode: 0o700 });
+      const temporary = `${tokenPlanCredentialPath}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, safeStorage.encryptString(fromEnvironment), { mode: 0o600 });
+      fs.renameSync(temporary, tokenPlanCredentialPath);
+    } else {
+      console.warn("[pinvou-aios] OS credential encryption is unavailable; Token Plan key was not persisted");
+    }
+    return fromEnvironment;
+  }
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return undefined;
+    return safeStorage.decryptString(fs.readFileSync(tokenPlanCredentialPath));
+  } catch {
+    return undefined;
+  }
+}
+
+function createVoiceOutput() {
+  return new VoiceOutputGateway({
+    apiKey: tokenPlanApiKey,
+    endpoint: process.env.PINVOU_TTS_WEBSOCKET_URL,
+    voice: process.env.PINVOU_TTS_VOICE || "longanlingxin",
+    onAudio(audio) {
+      if (uiView && !uiView.webContents.isDestroyed()) {
+        uiView.webContents.send("voice:audio", {
+          audio: new Uint8Array(audio.buffer, audio.byteOffset, audio.byteLength),
+          sampleRate: 24_000,
+        });
+      }
+    },
+    onState(state) {
+      if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.send("voice:output-state", state);
+    },
+    onFallback(text) {
+      if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.send("voice:fallback", { text });
+    },
+  });
+}
+
+function handleDaemonEvent(event) {
+  voiceOutput?.handleEvent(event);
+  if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.send("daemon:event", event);
+}
 
 function sendBrowserState(extra = {}) {
   const state = browserState(extra);
@@ -447,11 +501,18 @@ function registerIpc() {
         audio,
         mimeType,
         sampleRate,
-        apiKey: process.env.PINVOU_TOKEN_PLAN_API_KEY,
+        apiKey: tokenPlanApiKey,
       });
     } finally {
       voiceRecognitionInFlight = false;
     }
+  });
+  ipcMain.handle("voice:interrupt-output", (event) => {
+    trusted(event);
+    voiceOutput?.cancel();
+    uiView.webContents.send("voice:clear-audio");
+    uiView.webContents.send("voice:cancel-fallback");
+    return { interrupted: true };
   });
   ipcMain.handle("browser:status", (event) => {
     trusted(event);
@@ -584,8 +645,19 @@ async function createMainWindow() {
   const developmentUrl = process.env.PINVOU_AIOS_UI_DEV_URL;
   if (developmentUrl) await uiView.webContents.loadURL(developmentUrl);
   else await uiView.webContents.loadFile(path.join(appDirectory, "dist", "index.html"));
+  daemonEventStream = new DaemonEventStream({
+    socketPath,
+    onEvent: handleDaemonEvent,
+    onState(state) {
+      if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.send("daemon:event-state", state);
+    },
+  });
+  daemonEventStream.start();
   mainWindow.show();
   mainWindow.on("closed", () => {
+    daemonEventStream?.stop();
+    daemonEventStream = undefined;
+    voiceOutput?.cancel();
     stopArtifactWatcher();
     if (browserView && !browserView.webContents.isDestroyed()) browserView.webContents.close();
     if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.close();
@@ -602,10 +674,16 @@ if (hasSingleInstanceLock) {
     mainWindow.show();
     mainWindow.focus();
   });
-  app.on("before-quit", removeCdpEndpoint);
+  app.on("before-quit", () => {
+    daemonEventStream?.stop();
+    voiceOutput?.cancel();
+    removeCdpEndpoint();
+  });
   app.on("window-all-closed", () => app.quit());
   app.whenReady().then(async () => {
     console.log("[pinvou-aios] Electron ready");
+    tokenPlanApiKey = loadTokenPlanCredential();
+    voiceOutput = createVoiceOutput();
     session.defaultSession.setPermissionCheckHandler(() => false);
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     await createMainWindow();

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "node --test electron/*.test.mjs",
     "electron": "node electron/launcher.mjs",
     "start": "npm run build && npm run electron",
     "tauri": "tauri"

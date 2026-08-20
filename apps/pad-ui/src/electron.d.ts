@@ -34,6 +34,11 @@ interface PinvouSurfaceSelection {
 
 interface PinvouBridge {
   daemonRequest<T>(method: string, params?: Record<string, unknown>): Promise<T>;
+  voiceRecognize(
+    audio: ArrayBuffer,
+    mimeType: string,
+    sampleRate?: number,
+  ): Promise<{ text: string; requestId?: string; model: string }>;
   browserStatus(): Promise<PinvouBrowserState>;
   browserOpen(location: string): Promise<PinvouBrowserState>;
   browserOpenTaskArtifact(taskId: string, location: string): Promise<PinvouBrowserState>;

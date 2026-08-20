@@ -7,6 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { app, BaseWindow, WebContentsView, ipcMain, session } from "electron";
 
+import { recognizeWithTokenPlan } from "./asr.mjs";
+
 const electronDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.dirname(electronDirectory);
 const aiosHome = process.env.PINVOU_AIOS_HOME || path.join(os.homedir(), ".pinvou-aios");
@@ -44,6 +46,7 @@ let surfaceEditMode = false;
 let surfaceSelection;
 let artifactWatcher;
 let artifactReloadTimer;
+let voiceRecognitionInFlight = false;
 
 function sendBrowserState(extra = {}) {
   const state = browserState(extra);
@@ -393,6 +396,32 @@ function removeCdpEndpoint() {
   }
 }
 
+function configureUiPermissions() {
+  const uiSession = uiView.webContents.session;
+  const isTrustedUi = (webContents) => Boolean(
+    webContents
+    && uiView
+    && !uiView.webContents.isDestroyed()
+    && webContents.id === uiView.webContents.id,
+  );
+  uiSession.setPermissionCheckHandler((webContents, permission, _origin, details) => (
+    isTrustedUi(webContents)
+    && permission === "media"
+    && details?.mediaType !== "video"
+    && details?.isMainFrame !== false
+  ));
+  uiSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const mediaTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
+    const audioOnly = mediaTypes.length === 0 || mediaTypes.every((type) => type === "audio");
+    callback(
+      isTrustedUi(webContents)
+      && permission === "media"
+      && audioOnly
+      && details?.isMainFrame !== false,
+    );
+  });
+}
+
 function registerIpc() {
   const trusted = (event) => {
     if (!uiView || event.sender.id !== uiView.webContents.id) {
@@ -408,6 +437,21 @@ function registerIpc() {
   ipcMain.handle("daemon:request", (event, { method, params }) => {
     trusted(event);
     return daemonRequest(method, params || {});
+  });
+  ipcMain.handle("voice:recognize", async (event, { audio, mimeType, sampleRate }) => {
+    trusted(event);
+    if (voiceRecognitionInFlight) throw new Error("上一段语音仍在识别，请稍候");
+    voiceRecognitionInFlight = true;
+    try {
+      return await recognizeWithTokenPlan({
+        audio,
+        mimeType,
+        sampleRate,
+        apiKey: process.env.PINVOU_TOKEN_PLAN_API_KEY,
+      });
+    } finally {
+      voiceRecognitionInFlight = false;
+    }
   });
   ipcMain.handle("browser:status", (event) => {
     trusted(event);
@@ -526,6 +570,7 @@ async function createMainWindow() {
       webSecurity: true,
     },
   });
+  configureUiPermissions();
   mainWindow.contentView.addChildView(uiView);
   const layoutUi = () => {
     const [width, height] = mainWindow.getContentSize();
@@ -561,6 +606,7 @@ if (hasSingleInstanceLock) {
   app.on("window-all-closed", () => app.quit());
   app.whenReady().then(async () => {
     console.log("[pinvou-aios] Electron ready");
+    session.defaultSession.setPermissionCheckHandler(() => false);
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     await createMainWindow();
     console.log("[pinvou-aios] main window created");

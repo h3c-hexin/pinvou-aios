@@ -9,9 +9,10 @@
 - 主 Agent 通过扩展工具创建、查询和取消后台任务 Agent；
 - 主 Agent 通过单一 `playwright_cli` 工具使用官方 Playwright CLI 的全部命令，控制 AIOS 内置的人机共享 Chromium，同时不获得 Bash；
 - React + Electron 的 PAD 桌面壳展示主对话、后台任务和内置 Browser Surface；
+- Electron 可信 UI 支持点击录音，并通过 Token Plan 的 `qwen-audio-3.0-asr-flash` 将识别结果回填到主输入框；
 - SQLite 保存任务状态，Pi 自己保存会话历史。
 
-语音、MCP、富媒体产物、权限确认和业务连接器暂不在这个最小版本内。
+流式语音、TTS、MCP、权限确认和业务连接器暂不在这个最小版本内。
 
 ## 前置条件
 
@@ -61,6 +62,14 @@ export PINVOU_PI_PROVIDER=openai
 export PINVOU_PI_MODEL=gpt-5.2
 ```
 
+语音输入使用 Token Plan 个人版专属的 `sk-sp-` API Key。密钥只由 Electron 主进程读取，不会暴露给 React 页面或右侧 Browser Surface：
+
+```bash
+export PINVOU_TOKEN_PLAN_API_KEY='sk-sp-...'
+```
+
+点击输入框左侧的麦克风开始录音，再次点击后停止并识别；识别文字只回填输入框，不会自动发送。单次录音上限为两分钟。Token Plan 个人版应仅按其服务条款用于个人、单设备的交互式智能体工具场景。
+
 ## 运行
 
 终端一：
@@ -93,6 +102,7 @@ npm start
 - `PINVOU_PI_PROVIDER`
 - `PINVOU_PI_MODEL`
 - `PINVOU_PLAYWRIGHT_CLI`
+- `PINVOU_TOKEN_PLAN_API_KEY`
 - `PLAYWRIGHT_CLI_SESSION`
 - `PLAYWRIGHT_MCP_HEADLESS`
 - `PLAYWRIGHT_MCP_CONFIG`

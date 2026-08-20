@@ -9,6 +9,7 @@ import {
   Command,
   ExternalLink,
   Globe2,
+  LoaderCircle,
   Mic,
   MousePointer2,
   Plus,
@@ -82,6 +83,34 @@ interface SurfaceSelection {
   breadcrumbs: string[];
   rect: { x: number; y: number; width: number; height: number };
   styles: Record<string, string>;
+}
+
+type VoiceState = "idle" | "requesting" | "recording" | "recognizing";
+
+const maximumVoiceRecordingMs = 120_000;
+
+function preferredRecordingMimeType() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
+}
+
+function appendTranscript(current: string, transcript: string) {
+  if (!current.trim()) return transcript;
+  return `${current}${/\s$/.test(current) ? "" : " "}${transcript}`;
+}
+
+function voiceFailureMessage(reason: unknown) {
+  if (reason instanceof DOMException) {
+    if (reason.name === "NotAllowedError") return "未获得麦克风权限，请在系统设置中允许 Pinvou AIOS 使用麦克风";
+    if (reason.name === "NotFoundError") return "没有检测到可用的麦克风";
+    if (reason.name === "NotReadableError") return "麦克风暂时不可用，可能正被其他程序占用";
+  }
+  return reason instanceof Error ? reason.message : String(reason);
 }
 
 const emptySnapshot: Snapshot = {
@@ -171,10 +200,18 @@ function App() {
   const [surfaceInstruction, setSurfaceInstruction] = React.useState("");
   const [surfaceBusy, setSurfaceBusy] = React.useState(false);
   const [surfaceFeedback, setSurfaceFeedback] = React.useState<string>();
+  const [voiceState, setVoiceState] = React.useState<VoiceState>("idle");
+  const [voiceError, setVoiceError] = React.useState<string>();
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const browserViewportRef = React.useRef<HTMLDivElement>(null);
   const observedTaskStates = React.useRef<Map<string, TaskState>>(new Map());
   const taskStateHydrated = React.useRef(false);
+  const voiceRecorderRef = React.useRef<MediaRecorder | undefined>(undefined);
+  const voiceStreamRef = React.useRef<MediaStream | undefined>(undefined);
+  const voiceChunksRef = React.useRef<Blob[]>([]);
+  const voiceRecordingTimerRef = React.useRef<number | undefined>(undefined);
+  const voiceCancelledRef = React.useRef(false);
+  const voiceMountedRef = React.useRef(true);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -228,6 +265,18 @@ function App() {
   React.useEffect(() => window.pinvou.onSurfaceSelection((selection) => {
     setSurfaceSelection(selection);
   }), []);
+
+  React.useEffect(() => {
+    voiceMountedRef.current = true;
+    return () => {
+      voiceMountedRef.current = false;
+      voiceCancelledRef.current = true;
+      if (voiceRecordingTimerRef.current) window.clearTimeout(voiceRecordingTimerRef.current);
+      const recorder = voiceRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") recorder.stop();
+      voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
 
   React.useLayoutEffect(() => {
     const viewport = browserViewportRef.current;
@@ -291,6 +340,114 @@ function App() {
     } finally {
       setSending(false);
     }
+  }
+
+  function stopVoiceRecording() {
+    const recorder = voiceRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    setVoiceState("recognizing");
+    recorder.stop();
+  }
+
+  async function startVoiceRecording() {
+    if (voiceState !== "idle") return;
+    setVoiceError(undefined);
+    setVoiceState("requesting");
+    try {
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+        throw new Error("当前系统不支持麦克风录音");
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+      if (!voiceMountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const preferredMimeType = preferredRecordingMimeType();
+      const recorder = new MediaRecorder(
+        stream,
+        preferredMimeType ? { mimeType: preferredMimeType } : undefined,
+      );
+      voiceStreamRef.current = stream;
+      voiceRecorderRef.current = recorder;
+      voiceChunksRef.current = [];
+      voiceCancelledRef.current = false;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) voiceChunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        voiceCancelledRef.current = true;
+        if (voiceRecordingTimerRef.current) window.clearTimeout(voiceRecordingTimerRef.current);
+        stream.getTracks().forEach((track) => track.stop());
+        voiceRecorderRef.current = undefined;
+        voiceStreamRef.current = undefined;
+        setVoiceState("idle");
+        setVoiceError("录音失败，请检查麦克风后重试");
+      };
+      recorder.onstop = async () => {
+        if (voiceRecordingTimerRef.current) window.clearTimeout(voiceRecordingTimerRef.current);
+        voiceRecordingTimerRef.current = undefined;
+        stream.getTracks().forEach((track) => track.stop());
+        voiceRecorderRef.current = undefined;
+        voiceStreamRef.current = undefined;
+
+        if (voiceCancelledRef.current) {
+          voiceChunksRef.current = [];
+          return;
+        }
+
+        const mimeType = recorder.mimeType || preferredMimeType || "audio/webm";
+        const audio = new Blob(voiceChunksRef.current, { type: mimeType });
+        voiceChunksRef.current = [];
+        if (audio.size === 0) {
+          setVoiceState("idle");
+          setVoiceError("没有录到声音，请重试");
+          return;
+        }
+
+        setVoiceState("recognizing");
+        try {
+          const sampleRate = stream.getAudioTracks()[0]?.getSettings().sampleRate;
+          const result = await window.pinvou.voiceRecognize(
+            await audio.arrayBuffer(),
+            mimeType,
+            sampleRate,
+          );
+          setInput((current) => appendTranscript(current, result.text));
+          setVoiceError(undefined);
+        } catch (reason) {
+          setVoiceError(voiceFailureMessage(reason));
+        } finally {
+          setVoiceState("idle");
+        }
+      };
+
+      recorder.start(250);
+      setVoiceState("recording");
+      voiceRecordingTimerRef.current = window.setTimeout(
+        stopVoiceRecording,
+        maximumVoiceRecordingMs,
+      );
+    } catch (reason) {
+      voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
+      voiceStreamRef.current = undefined;
+      voiceRecorderRef.current = undefined;
+      setVoiceState("idle");
+      setVoiceError(voiceFailureMessage(reason));
+    }
+  }
+
+  function toggleVoiceRecording() {
+    if (voiceState === "recording") stopVoiceRecording();
+    else if (voiceState === "idle") void startVoiceRecording();
   }
 
   async function createTask(event: React.FormEvent<HTMLFormElement>) {
@@ -487,7 +644,21 @@ function App() {
         </div>
 
         <form className="composer glass-panel" onSubmit={sendMessage}>
-          <button className="icon-button" type="button" title="语音入口将在下一阶段接入"><Mic size={20} /></button>
+          <button
+            className={`icon-button voice-button voice-button--${voiceState}`}
+            type="button"
+            title={voiceState === "recording" ? "点击停止并识别" : voiceState === "idle" ? "点击开始语音输入" : "正在处理语音"}
+            aria-label={voiceState === "recording" ? "停止录音" : "开始语音输入"}
+            aria-pressed={voiceState === "recording"}
+            disabled={sending || (voiceState !== "idle" && voiceState !== "recording")}
+            onClick={toggleVoiceRecording}
+          >
+            {voiceState === "recording"
+              ? <CircleStop size={20} />
+              : voiceState === "requesting" || voiceState === "recognizing"
+                ? <LoaderCircle className="spin" size={20} />
+                : <Mic size={20} />}
+          </button>
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
@@ -504,7 +675,18 @@ function App() {
             <Send size={18} />
           </button>
         </form>
-        {error && <div className="error-banner">{error}</div>}
+        <div className="composer-feedback" aria-live="polite">
+          {voiceState !== "idle" && (
+            <div className={`voice-banner voice-banner--${voiceState}`}>
+              <span className="voice-level"><i /><i /><i /></span>
+              {voiceState === "requesting" && "正在请求麦克风权限…"}
+              {voiceState === "recording" && "正在录音，再次点击麦克风即可停止"}
+              {voiceState === "recognizing" && "千问正在识别…"}
+            </div>
+          )}
+          {voiceError && <div className="error-banner">{voiceError}</div>}
+          {error && <div className="error-banner">{error}</div>}
+        </div>
       </section>
 
       <section className="browser-workspace">

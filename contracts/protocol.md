@@ -1,6 +1,8 @@
 # Daemon JSONL protocol
 
-客户端连接 Unix Socket（默认 `~/.pinvou-aios/run/aios.sock`），每行发送一个 JSON 对象：
+客户端连接本地 IPC，每行发送一个 JSON 对象。Linux/macOS 默认使用 Unix Socket
+`~/.pinvou-aios/run/aios.sock`；Windows 默认使用 TCP `127.0.0.1:57931`。
+可用 `PINVOU_AIOS_SOCKET` 或 `PINVOU_AIOS_TCP_ADDR` 覆盖。
 
 ```json
 {"id":"1","method":"snapshot.get","params":{}}

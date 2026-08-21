@@ -94,6 +94,27 @@ cd daemon
 cargo run
 ```
 
+Windows 原生开发环境使用本机 TCP 连接 daemon。没有真实 Pi 可执行文件时，可以先用开发占位 Agent 跑通 UI：
+
+```powershell
+$env:PINVOU_AIOS_TCP_ADDR='127.0.0.1:57931'
+$env:PINVOU_PI_BIN='C:\Program Files\nodejs\node.exe'
+$env:PINVOU_PI_SCRIPT='C:\path\to\pinvou-aios\scripts\dev-pi-stub.mjs'
+cargo run
+```
+
+Windows 上接入 DeepSeek 时，先复制 `.env.example` 为 `.env` 并填写 `DEEPSEEK_API_KEY`，然后分别启动 daemon 和 Electron：
+
+```powershell
+.\scripts\start-daemon-windows.ps1
+```
+
+```powershell
+.\scripts\start-electron-windows.ps1
+```
+
+`.env` 已被 git 忽略，不会提交到仓库。默认模型为 `deepseek-v4-flash`，可通过 `PINVOU_PI_MODEL` 覆盖。
+
 也可以安装为当前 Linux 用户的常驻 systemd 服务：
 
 ```bash
@@ -113,7 +134,9 @@ npm start
 
 - `PINVOU_AIOS_HOME`
 - `PINVOU_AIOS_SOCKET`
+- `PINVOU_AIOS_TCP_ADDR`
 - `PINVOU_PI_BIN`
+- `PINVOU_PI_SCRIPT`
 - `PINVOU_PI_PROVIDER`
 - `PINVOU_PI_MODEL`
 - `PINVOU_PLAYWRIGHT_CLI`

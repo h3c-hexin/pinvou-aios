@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { app, BaseWindow, WebContentsView, ipcMain, safeStorage, session } from "electron";
+import { app, BaseWindow, Menu, WebContentsView, ipcMain, nativeTheme, safeStorage, session } from "electron";
 
 import { recognizeWithTokenPlan } from "./asr.mjs";
 import { DaemonEventStream } from "./daemon-events.mjs";
@@ -15,6 +15,13 @@ const electronDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.dirname(electronDirectory);
 const aiosHome = process.env.PINVOU_AIOS_HOME || path.join(os.homedir(), ".pinvou-aios");
 const socketPath = process.env.PINVOU_AIOS_SOCKET || path.join(aiosHome, "run", "aios.sock");
+const tcpAddr = process.env.PINVOU_AIOS_TCP_ADDR || "127.0.0.1:57931";
+const daemonConnection = process.env.PINVOU_AIOS_TCP_ADDR || process.platform === "win32"
+  ? tcpConnectionOptions(tcpAddr)
+  : socketPath;
+const daemonEndpoint = typeof daemonConnection === "string"
+  ? daemonConnection
+  : `${daemonConnection.host}:${daemonConnection.port}`;
 const cdpPort = Number.parseInt(process.env.PINVOU_BROWSER_CDP_PORT || "", 10);
 const cdpEndpoint = `http://127.0.0.1:${cdpPort}`;
 const cdpStatePath = path.join(aiosHome, "run", "browser-cdp.json");
@@ -22,9 +29,23 @@ const tokenPlanCredentialPath = path.join(aiosHome, "credentials", "token-plan.e
 const instanceId = crypto.randomUUID();
 
 console.log(`[pinvou-aios] Electron main starting (pid=${process.pid}, cdp=${cdpEndpoint})`);
+console.log(`[pinvou-aios] daemon endpoint ${daemonEndpoint}`);
 
 if (!Number.isInteger(cdpPort) || cdpPort <= 0 || cdpPort > 65535) {
   throw new Error("PINVOU_BROWSER_CDP_PORT must contain a valid TCP port");
+}
+
+function tcpConnectionOptions(address) {
+  const separator = address.lastIndexOf(":");
+  if (separator <= 0 || separator === address.length - 1) {
+    throw new Error("PINVOU_AIOS_TCP_ADDR must use host:port format");
+  }
+  const host = address.slice(0, separator);
+  const port = Number.parseInt(address.slice(separator + 1), 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error("PINVOU_AIOS_TCP_ADDR must contain a valid TCP port");
+  }
+  return { host, port };
 }
 
 fs.mkdirSync(path.join(aiosHome, "electron"), { recursive: true });
@@ -54,6 +75,24 @@ let voiceRecognitionInFlight = false;
 let daemonEventStream;
 let tokenPlanApiKey;
 let voiceOutput;
+let themeMode = "system";
+
+function applyAppTheme(mode = "system") {
+  themeMode = ["system", "light", "dark"].includes(mode) ? mode : "system";
+  nativeTheme.themeSource = themeMode;
+  const dark = nativeTheme.shouldUseDarkColors;
+  const backgroundColor = dark ? "#000000" : "#ffffff";
+  if (typeof mainWindow?.setBackgroundColor === "function") {
+    mainWindow.setBackgroundColor(backgroundColor);
+  }
+  for (const view of [uiView, browserView]) {
+    if (!view || view.webContents.isDestroyed()) continue;
+    if (typeof view.setBackgroundColor === "function") {
+      view.setBackgroundColor(backgroundColor);
+    }
+  }
+  return { mode: themeMode, dark };
+}
 
 function loadTokenPlanCredential() {
   const fromEnvironment = String(process.env.PINVOU_TOKEN_PLAN_API_KEY || "").trim();
@@ -466,7 +505,7 @@ function normalizeTaskArtifactLocation(taskIdValue, locationValue) {
 function daemonRequest(method, params) {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
-    const socket = net.createConnection(socketPath);
+    const socket = net.createConnection(daemonConnection);
     let buffer = "";
     let settled = false;
     const finish = (callback, value) => {
@@ -586,6 +625,10 @@ function registerIpc() {
   ipcMain.handle("daemon:request", (event, { method, params }) => {
     trusted(event);
     return daemonRequest(method, params || {});
+  });
+  ipcMain.handle("theme:set", (event, { mode }) => {
+    trusted(event);
+    return applyAppTheme(mode);
   });
   ipcMain.handle("voice:recognize", async (event, { audio, mimeType, sampleRate }) => {
     trusted(event);
@@ -748,6 +791,7 @@ async function createMainWindow() {
   });
   configureUiPermissions();
   mainWindow.contentView.addChildView(uiView);
+  applyAppTheme(themeMode);
   const layoutUi = () => {
     const [width, height] = mainWindow.getContentSize();
     uiView.setBounds({ x: 0, y: 0, width, height });
@@ -764,7 +808,7 @@ async function createMainWindow() {
     console.warn("[pinvou-aios] failed to clear stale artifact context", error.message);
   });
   daemonEventStream = new DaemonEventStream({
-    socketPath,
+    connection: daemonConnection,
     onEvent: handleDaemonEvent,
     onState(state) {
       if (uiView && !uiView.webContents.isDestroyed()) uiView.webContents.send("daemon:event-state", state);
@@ -808,6 +852,7 @@ if (hasSingleInstanceLock) {
   app.on("window-all-closed", () => app.quit());
   app.whenReady().then(async () => {
     console.log("[pinvou-aios] Electron ready");
+    Menu.setApplicationMenu(null);
     tokenPlanApiKey = loadTokenPlanCredential();
     voiceOutput = createVoiceOutput();
     session.defaultSession.setPermissionCheckHandler(() => false);

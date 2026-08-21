@@ -6,18 +6,19 @@ import {
   Check,
   ChevronRight,
   CircleStop,
-  Command,
   ExternalLink,
   FileText,
   Globe2,
   LoaderCircle,
   Mic,
+  Moon,
   MousePointer2,
   Plus,
   RefreshCw,
   Radio,
   Send,
   Sparkles,
+  Sun,
   Undo2,
   X,
 } from "lucide-react";
@@ -100,8 +101,10 @@ interface SurfaceSelection {
 
 type VoiceState = "idle" | "requesting" | "recording" | "recognizing" | "listening" | "hearing";
 type VoiceMode = "push" | "continuous";
+type ThemeMode = "light" | "dark";
 
 const maximumVoiceRecordingMs = 120_000;
+const themeStorageKey = "pinvou-theme-mode";
 
 function preferredRecordingMimeType() {
   const candidates = [
@@ -119,12 +122,26 @@ function appendTranscript(current: string, transcript: string) {
 }
 
 function voiceFailureMessage(reason: unknown) {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  if (message.includes("PINVOU_TOKEN_PLAN_API_KEY")) {
+    return "语音识别未配置，暂时只能使用文字输入";
+  }
+  if (message.includes("voice:recognize")) {
+    return "语音识别暂不可用，请稍后重试";
+  }
   if (reason instanceof DOMException) {
     if (reason.name === "NotAllowedError") return "未获得麦克风权限，请在系统设置中允许 Pinvou AIOS 使用麦克风";
     if (reason.name === "NotFoundError") return "没有检测到可用的麦克风";
     if (reason.name === "NotReadableError") return "麦克风暂时不可用，可能正被其他程序占用";
   }
-  return reason instanceof Error ? reason.message : String(reason);
+  return message;
+}
+
+function friendlyRuntimeError(message: string) {
+  if (message.includes("daemon:request") || message.includes("aios.sock") || message.includes("ENOENT")) {
+    return "后台服务未连接";
+  }
+  return message;
 }
 
 const emptySnapshot: Snapshot = {
@@ -197,6 +214,11 @@ function App() {
   const [input, setInput] = React.useState("");
   const [error, setError] = React.useState<string>();
   const [sending, setSending] = React.useState(false);
+  const [themeMode, setThemeMode] = React.useState<ThemeMode>(() => {
+    const saved = window.localStorage.getItem(themeStorageKey);
+    if (saved === "light" || saved === "dark") return saved;
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
   const [selectedTask, setSelectedTask] = React.useState<Task>();
   const [manualTask, setManualTask] = React.useState(false);
   const [completedNotice, setCompletedNotice] = React.useState<Task>();
@@ -231,6 +253,13 @@ function App() {
   const voiceCaptureRef = React.useRef<ContinuousVoiceCapture | undefined>(undefined);
   const voicePlayerRef = React.useRef(new PcmAudioPlayer());
   const voiceStreamTextRef = React.useRef("");
+
+  React.useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = themeMode;
+    window.localStorage.setItem(themeStorageKey, themeMode);
+    void window.pinvou.setThemeMode(themeMode).catch(() => undefined);
+  }, [themeMode]);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -729,8 +758,10 @@ function App() {
   ];
   const messages = snapshot.main.messages;
   const mainNeedsSetup = snapshot.main.status === "needs_setup" || snapshot.main.status === "offline";
+  const showRuntimeStatus = Boolean(error) || mainNeedsSetup || ["starting", "thinking"].includes(snapshot.main.status);
   const surfaceTask = snapshot.tasks.find((task) => task.id === browserState.taskId);
   const surfaceTaskActive = surfaceTask?.state === "queued" || surfaceTask?.state === "running";
+  const darkMode = themeMode === "dark";
 
   return (
     <main className="shell">
@@ -740,42 +771,37 @@ function App() {
       <section className="conversation glass-panel">
         <header className="topbar topbar--agent">
           <div>
-            <span className="eyebrow">PINVOU AIOS</span>
-            <h1>主 Agent</h1>
+            <h1>AI 对话</h1>
           </div>
-          <div className="runtime-pill">
-            <span className={`status-dot status-dot--${mainNeedsSetup ? "failed" : "running"}`} />
-            Pi · {snapshot.main.status === "thinking" ? "思考中" : snapshot.main.status === "needs_setup" ? "待配置模型" : snapshot.main.status === "offline" ? "离线" : "就绪"}
+          <div className="topbar-actions">
+            <button
+              className={`theme-toggle${darkMode ? " theme-toggle--dark" : ""}`}
+              type="button"
+              title={darkMode ? "切换到浅色模式" : "切换到深色模式"}
+              aria-label={darkMode ? "当前深色模式，切换到浅色模式" : "当前浅色模式，切换到深色模式"}
+              aria-pressed={darkMode}
+              onClick={() => setThemeMode(darkMode ? "light" : "dark")}
+            >
+              <span className="theme-toggle__thumb">
+                {darkMode ? <Moon size={14} /> : <Sun size={14} />}
+              </span>
+            </button>
+            {showRuntimeStatus && (
+              <div className="runtime-pill">
+                <span className={`status-dot status-dot--${error || mainNeedsSetup ? "failed" : "running"}`} />
+                {error ? "未连接" : snapshot.main.status === "thinking" ? "思考中" : snapshot.main.status === "needs_setup" ? "待配置模型" : snapshot.main.status === "offline" ? "离线" : "启动中"}
+              </div>
+            )}
           </div>
         </header>
 
-        <section className="process-strip" aria-label="任务进程状态">
-          <div className="process-strip__header">
-            <div>
-              <span className="eyebrow">PROCESSES</span>
-              <span className="process-summary">
-                {running.length ? `${running.length} 个运行中` : "当前空闲"} · 共 {snapshot.tasks.length} 个
-              </span>
-            </div>
-            <button className="icon-button icon-button--compact" title="手动创建任务" onClick={() => setManualTask(true)}><Plus size={16} /></button>
-          </div>
-          <div className="process-strip__list">
-            {orderedTasks.length ? orderedTasks.map((task) => (
-              <TaskChip key={task.id} task={task} onOpen={() => void openTask(task)} onCancel={() => void cancelTask(task)} />
-            )) : <div className="process-empty"><span className="status-dot" />后台进程将在这里显示</div>}
-          </div>
-        </section>
-
         <div className="message-stream" ref={scrollRef}>
           {messages.length === 0 && !snapshot.main.streamingText ? (
-            <div className="welcome-card glass-panel">
-              <div className="welcome-icon"><Command size={28} /></div>
-              <p className="eyebrow">ALWAYS READY</p>
-              <h2>现在想做点什么？</h2>
-              <p>你只需要对话。复杂工作会进入独立后台进程，主对话始终可以继续。</p>
+            <div className="welcome-card">
+              <h2>今天想做什么？</h2>
               <div className="suggestions">
-                <button onClick={() => setInput("帮我整理一份本周工作汇报")}>整理工作汇报</button>
-                <button onClick={() => setInput("研究一个主题并给我结论")}>研究并总结</button>
+                <button onClick={() => setInput("帮我整理一份本周工作汇报")}>整理汇报</button>
+                <button onClick={() => setInput("研究一个主题并给我结论")}>研究总结</button>
               </div>
             </div>
           ) : (
@@ -794,32 +820,22 @@ function App() {
           )}
         </div>
 
-        <form className="composer glass-panel" onSubmit={sendMessage}>
-          <button
-            className={`voice-mode-toggle ${voiceMode === "continuous" ? "voice-mode-toggle--active" : ""}`}
-            type="button"
-            title={voiceMode === "push" ? "切换到连续对话" : "切换到单次对话"}
-            onClick={() => void changeVoiceMode()}
-          >
-            <Radio size={13} />{voiceMode === "continuous" ? "连续" : "单次"}
-          </button>
-          <button
-            className={`icon-button voice-button voice-button--${voiceState}`}
-            type="button"
-            title={voiceMode === "continuous"
-              ? voiceState === "idle" ? "开始连续语音对话" : "停止连续语音对话"
-              : voiceState === "recording" ? "点击停止并识别" : voiceState === "idle" ? "点击开始单次语音对话" : "正在处理语音"}
-            aria-label={voiceState === "recording" ? "停止录音" : "开始语音输入"}
-            aria-pressed={voiceState === "recording"}
-            disabled={sending || (voiceMode === "push" && voiceState !== "idle" && voiceState !== "recording")}
-            onClick={toggleVoiceRecording}
-          >
-            {voiceState === "recording" || voiceState === "hearing"
-              ? <CircleStop size={20} />
-              : voiceState === "requesting" || voiceState === "recognizing"
-                ? <LoaderCircle className="spin" size={20} />
-                : <Mic size={20} />}
-          </button>
+        {orderedTasks.length > 0 && (
+          <section className="process-strip" aria-label="后台任务">
+            <div className="process-strip__list">
+              {orderedTasks.slice(0, 3).map((task) => (
+                <TaskChip
+                  key={task.id}
+                  task={task}
+                  onOpen={() => void openTask(task)}
+                  onCancel={() => void cancelTask(task)}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <form className="composer" onSubmit={sendMessage}>
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
@@ -829,12 +845,53 @@ function App() {
                 event.currentTarget.form?.requestSubmit();
               }
             }}
-            placeholder="和 Pinvou 说点什么…"
+            placeholder="Let's write or build together"
             rows={1}
           />
-          <button className="send-button" type="submit" disabled={!input.trim() || sending}>
-            <Send size={18} />
-          </button>
+          <div className="composer-toolbar">
+            <div className="composer-tools">
+              <button
+                className="icon-button composer-plus"
+                type="button"
+                title="创建后台任务"
+                onClick={() => setManualTask(true)}
+              >
+                <Plus size={20} />
+              </button>
+              <button
+                className={`voice-mode-toggle ${voiceMode === "continuous" ? "voice-mode-toggle--active" : ""}`}
+                type="button"
+                title={voiceMode === "push" ? "切换到连续对话" : "切换到单次对话"}
+                aria-label={voiceMode === "push" ? "当前单次对话，切换到连续对话" : "当前连续对话，切换到单次对话"}
+                onClick={() => void changeVoiceMode()}
+              >
+                <Radio size={13} />
+                <span>{voiceMode === "continuous" ? "连续" : "单次"}</span>
+              </button>
+            </div>
+            <div className="composer-tools composer-tools--right">
+            <button
+              className={`icon-button voice-button voice-button--${voiceState}`}
+              type="button"
+              title={voiceMode === "continuous"
+                ? voiceState === "idle" ? "开始连续语音对话" : "停止连续语音对话"
+                : voiceState === "recording" ? "点击停止并识别" : voiceState === "idle" ? "点击开始单次语音对话" : "正在处理语音"}
+              aria-label={voiceState === "recording" ? "停止录音" : "开始语音输入"}
+              aria-pressed={voiceState === "recording"}
+              disabled={sending || (voiceMode === "push" && voiceState !== "idle" && voiceState !== "recording")}
+              onClick={toggleVoiceRecording}
+            >
+              {voiceState === "recording" || voiceState === "hearing"
+                ? <CircleStop size={19} />
+                : voiceState === "requesting" || voiceState === "recognizing"
+                  ? <LoaderCircle className="spin" size={19} />
+                  : <Mic size={19} />}
+            </button>
+              <button className="send-button" type="submit" disabled={!input.trim() || sending}>
+                <Send size={18} />
+              </button>
+            </div>
+          </div>
         </form>
         <div className="composer-feedback" aria-live="polite">
           {snapshot.activeArtifact && (
@@ -867,7 +924,7 @@ function App() {
             <div className="voice-banner"><span className="voice-level"><i /><i /><i /></span>{voiceOutputState === "fallback" ? "Pinvou 正在使用本机语音" : "Pinvou 正在说话"}</div>
           )}
           {voiceError && <div className="error-banner">{voiceError}</div>}
-          {error && <div className="error-banner">{error}</div>}
+          {error && <div className="error-banner">{friendlyRuntimeError(error)}</div>}
         </div>
       </section>
 
@@ -876,25 +933,29 @@ function App() {
           <section className="browser-console glass-panel">
             <div className="browser-console__heading">
               <span className="browser-lights"><i /><i /><i /></span>
-              <span className="browser-console__title">{browserState.title || "Pinvou Chromium"}</span>
-              <span className="surface-badge">
-                <span className={`status-dot status-dot--${browserState.open ? "running" : "queued"}`} />
-                {browserState.loading ? "加载中" : browserState.open ? "Agent · Human" : "待打开"}
-              </span>
+              <span className="browser-console__title">{browserState.open ? browserState.title || "网页" : ""}</span>
+              {(browserState.open || browserState.loading) && (
+                <span className="surface-badge">
+                  <span className={`status-dot status-dot--${browserState.open ? "running" : "queued"}`} />
+                  {browserState.loading ? "加载中" : "共享页面"}
+                </span>
+              )}
             </div>
-            <form className="browser-toolbar" onSubmit={openBrowser}>
+            <form className={`browser-toolbar ${browserState.editable || browserState.editMode ? "" : "browser-toolbar--plain"}`} onSubmit={openBrowser}>
               <button type="button" title="后退" disabled={!browserState.open} onClick={() => void controlBrowser("back")}><ArrowLeft size={17} /></button>
               <button type="button" title="前进" disabled={!browserState.open} onClick={() => void controlBrowser("forward")}><ArrowRight size={17} /></button>
               <button type="button" title="刷新" disabled={!browserState.open} onClick={() => void controlBrowser("reload")}><RefreshCw size={16} /></button>
-              <button
-                className={`surface-edit-toggle ${browserState.editMode ? "surface-edit-toggle--active" : ""}`}
-                type="button"
-                title={browserState.editable ? "点击页面元素并告诉 AI 如何修改" : "仅任务生成的本地 HTML 支持 AI 修改"}
-                disabled={!browserState.editable}
-                onClick={() => void toggleSurfaceEdit()}
-              >
-                <MousePointer2 size={15} /><span>AI 修改</span>
-              </button>
+              {(browserState.editable || browserState.editMode) && (
+                <button
+                  className={`surface-edit-toggle ${browserState.editMode ? "surface-edit-toggle--active" : ""}`}
+                  type="button"
+                  title="点击页面元素并告诉 AI 如何修改"
+                  disabled={!browserState.editable}
+                  onClick={() => void toggleSurfaceEdit()}
+                >
+                  <MousePointer2 size={15} /><span>AI 修改</span>
+                </button>
+              )}
               <div className="browser-address">
                 <Globe2 size={15} />
                 <input
@@ -904,8 +965,14 @@ function App() {
                   aria-label="网页地址"
                 />
               </div>
-              <button className="browser-go" type="submit" disabled={!browserLocation.trim() || browserBusy}>
-                {browserBusy ? "打开中" : "打开"}<ExternalLink size={15} />
+              <button
+                className="browser-go"
+                type="submit"
+                title={browserBusy ? "正在打开" : "打开网页"}
+                aria-label={browserBusy ? "正在打开" : "打开网页"}
+                disabled={!browserLocation.trim() || browserBusy}
+              >
+                {browserBusy ? <RefreshCw size={15} /> : <ExternalLink size={16} />}
               </button>
               <button
                 type="button"
@@ -917,13 +984,6 @@ function App() {
           </section>
 
           <section className={`browser-viewport-shell ${browserState.open ? "browser-viewport-shell--open" : ""}`}>
-            <div className="browser-empty-state">
-              <div className="surface-preview__icon"><Globe2 size={30} /></div>
-              <span className="eyebrow">HUMAN · AI · WEB</span>
-              <h2>打开一个共享页面</h2>
-              <p>你和主 Agent 将观察并操作同一个内置 Chromium 页面。</p>
-              <button className="primary-action" onClick={() => void openBrowser()}><Globe2 size={16} />打开示例页面</button>
-            </div>
             <div className="browser-viewport" ref={browserViewportRef} aria-label="内置 Chromium 页面区域" />
           </section>
 

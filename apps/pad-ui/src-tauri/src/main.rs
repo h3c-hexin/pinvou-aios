@@ -2,11 +2,15 @@ use std::{env, path::PathBuf, time::Duration};
 
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
 };
+#[cfg(not(unix))]
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use uuid::Uuid;
 
+#[cfg(unix)]
 fn socket_path() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("PINVOU_AIOS_SOCKET") {
         return Ok(PathBuf::from(path));
@@ -18,15 +22,38 @@ fn socket_path() -> Result<PathBuf, String> {
     Ok(root.join("run/aios.sock"))
 }
 
+#[cfg(not(unix))]
+fn tcp_addr() -> String {
+    env::var("PINVOU_AIOS_TCP_ADDR").unwrap_or_else(|_| "127.0.0.1:57931".to_owned())
+}
+
 #[tauri::command]
 async fn daemon_request(method: String, params: Value) -> Result<Value, String> {
     let id = Uuid::new_v4().to_string();
-    let path = socket_path()?;
-    let stream = tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(&path))
-        .await
-        .map_err(|_| format!("连接 AIOS 守护进程超时：{}", path.display()))?
-        .map_err(|error| format!("无法连接 AIOS 守护进程：{error}"))?;
-    let (read_half, mut write_half) = stream.into_split();
+    #[cfg(unix)]
+    let stream = {
+        let path = socket_path()?;
+        tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(&path))
+            .await
+            .map_err(|_| format!("连接 AIOS 守护进程超时：{}", path.display()))?
+            .map_err(|error| format!("无法连接 AIOS 守护进程：{error}"))?
+    };
+    #[cfg(not(unix))]
+    let stream = {
+        let addr = tcp_addr();
+        tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
+            .await
+            .map_err(|_| format!("连接 AIOS 守护进程超时：{addr}"))?
+            .map_err(|error| format!("无法连接 AIOS 守护进程：{error}"))?
+    };
+    daemon_rpc(stream, id, method, params).await
+}
+
+async fn daemon_rpc<S>(stream: S, id: String, method: String, params: Value) -> Result<Value, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let request = json!({ "id": id, "method": method, "params": params });
     let mut encoded = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     encoded.push(b'\n');

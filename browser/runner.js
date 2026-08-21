@@ -13,6 +13,13 @@ export const defaultPlaywrightCliPath = path.join(
   ".bin",
   "playwright-cli",
 );
+export const defaultPlaywrightCliJsPath = path.join(
+  browserDirectory,
+  "node_modules",
+  "@playwright",
+  "cli",
+  "playwright-cli.js",
+);
 export const defaultPlaywrightCliConfigPath = path.join(browserDirectory, "cli.config.json");
 export const defaultBrowserCdpStatePath = path.join(
   process.env.PINVOU_AIOS_HOME || path.join(os.homedir(), ".pinvou-aios"),
@@ -70,14 +77,38 @@ export function buildPlaywrightCliEnvironment(overrides = {}) {
   };
 }
 
+function windowsPlaywrightNode() {
+  if (process.env.PINVOU_PLAYWRIGHT_NODE) return process.env.PINVOU_PLAYWRIGHT_NODE;
+  const bundledNode22 = path.join(os.homedir(), ".workbuddy", "binaries", "node", "versions", "22.22.2", "node.exe");
+  if (fs.existsSync(bundledNode22)) return bundledNode22;
+  return process.execPath;
+}
+
+function resolvePlaywrightCliInvocation(executable, args) {
+  if (process.platform !== "win32") {
+    return { command: executable, args };
+  }
+
+  const name = path.basename(executable).toLowerCase();
+  if (name === "playwright-cli" || name === "playwright-cli.cmd" || executable === defaultPlaywrightCliPath) {
+    return {
+      command: windowsPlaywrightNode(),
+      args: [defaultPlaywrightCliJsPath, ...args],
+    };
+  }
+
+  return { command: executable, args };
+}
+
 function executePlaywrightCli(args, options = {}) {
   const executable = options.executable || process.env.PINVOU_PLAYWRIGHT_CLI || defaultPlaywrightCliPath;
+  const invocation = resolvePlaywrightCliInvocation(executable, args);
   const cwd = options.cwd || process.cwd();
   const maxOutputBytes = options.maxOutputBytes || DEFAULT_MAX_OUTPUT_BYTES;
   const env = options.resolvedEnv || buildPlaywrightCliEnvironment(options.env);
 
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
+    const child = spawn(invocation.command, invocation.args, {
       cwd,
       env,
       shell: false,

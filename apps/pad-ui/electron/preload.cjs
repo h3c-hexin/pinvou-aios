@@ -4,6 +4,9 @@ contextBridge.exposeInMainWorld("pinvou", Object.freeze({
   daemonRequest(method, params = {}) {
     return ipcRenderer.invoke("daemon:request", { method, params });
   },
+  setThemeMode(mode) {
+    return ipcRenderer.invoke("theme:set", { mode });
+  },
   voiceRecognize(audio, mimeType, sampleRate) {
     return ipcRenderer.invoke("voice:recognize", { audio, mimeType, sampleRate });
   },

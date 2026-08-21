@@ -7,11 +7,32 @@ import { runPlaywrightCli } from "../browser/runner.js";
 
 const socketPath = () =>
   process.env.PINVOU_AIOS_SOCKET || path.join(process.env.PINVOU_AIOS_HOME || path.join(os.homedir(), ".pinvou-aios"), "run", "aios.sock");
+const tcpAddr = () => process.env.PINVOU_AIOS_TCP_ADDR || "127.0.0.1:57931";
+
+function tcpConnectionOptions(address) {
+  const separator = address.lastIndexOf(":");
+  if (separator <= 0 || separator === address.length - 1) {
+    throw new Error("PINVOU_AIOS_TCP_ADDR must use host:port format");
+  }
+  const host = address.slice(0, separator);
+  const port = Number.parseInt(address.slice(separator + 1), 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error("PINVOU_AIOS_TCP_ADDR must contain a valid TCP port");
+  }
+  return { host, port };
+}
+
+function daemonConnection() {
+  if (process.env.PINVOU_AIOS_TCP_ADDR || process.platform === "win32") {
+    return tcpConnectionOptions(tcpAddr());
+  }
+  return socketPath();
+}
 
 function rpc(method, params = {}) {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
-    const socket = net.createConnection(socketPath());
+    const socket = net.createConnection(daemonConnection());
     let buffer = "";
     const timer = setTimeout(() => {
       socket.destroy();

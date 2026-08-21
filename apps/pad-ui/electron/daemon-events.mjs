@@ -1,8 +1,8 @@
 import net from "node:net";
 
 export class DaemonEventStream {
-  constructor({ socketPath, onEvent, onState = () => {}, retryMs = 800 }) {
-    this.socketPath = socketPath;
+  constructor({ connection, socketPath, onEvent, onState = () => {}, retryMs = 800 }) {
+    this.connection = connection || socketPath;
     this.onEvent = onEvent;
     this.onState = onState;
     this.retryMs = retryMs;
@@ -29,7 +29,7 @@ export class DaemonEventStream {
 
   #connect() {
     if (this.stopped) return;
-    const socket = net.createConnection(this.socketPath);
+    const socket = net.createConnection(this.connection);
     this.socket = socket;
     socket.setEncoding("utf8");
     socket.once("connect", () => this.onState({ connected: true }));

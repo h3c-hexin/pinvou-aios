@@ -36,6 +36,7 @@ interface PinvouSurfaceSelection {
 
 interface PinvouBridge {
   daemonRequest<T>(method: string, params?: Record<string, unknown>): Promise<T>;
+  setThemeMode(mode: "light" | "dark"): Promise<{ mode: "system" | "light" | "dark"; dark: boolean }>;
   voiceRecognize(
     audio: ArrayBuffer,
     mimeType: string,

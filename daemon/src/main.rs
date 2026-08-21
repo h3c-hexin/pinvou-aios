@@ -13,11 +13,13 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    net::TcpListener,
     process::Command,
     sync::{RwLock, broadcast, mpsc},
 };
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -25,7 +27,9 @@ use uuid::Uuid;
 struct Config {
     root: PathBuf,
     socket: PathBuf,
+    tcp_addr: String,
     pi_bin: PathBuf,
+    pi_script: Option<PathBuf>,
     extension: PathBuf,
     playwright_cli: PathBuf,
     main_prompt: String,
@@ -41,26 +45,36 @@ impl Config {
             .context("daemon must live inside the project")?
             .to_path_buf();
         let home = env::var_os("HOME")
+            .or_else(|| env::var_os("USERPROFILE"))
             .map(PathBuf::from)
-            .context("HOME is not set")?;
+            .context("HOME or USERPROFILE is not set")?;
         let root = env::var_os("PINVOU_AIOS_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".pinvou-aios"));
         let socket = env::var_os("PINVOU_AIOS_SOCKET")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("run/aios.sock"));
+        let tcp_addr = env::var("PINVOU_AIOS_TCP_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:57931".to_owned());
         let pi_bin = env::var_os("PINVOU_PI_BIN")
             .map(PathBuf::from)
             .unwrap_or_else(|| project.join("../pi/pi-test.sh"));
+        let pi_script = env::var_os("PINVOU_PI_SCRIPT").map(PathBuf::from);
         let extension = project.join("extensions/aios-runtime.js");
-        let playwright_cli = project.join("browser/node_modules/.bin/playwright-cli");
+        let playwright_cli = if cfg!(windows) {
+            project.join("browser/node_modules/.bin/playwright-cli.cmd")
+        } else {
+            project.join("browser/node_modules/.bin/playwright-cli")
+        };
         let main_prompt = fs::read_to_string(project.join("profiles/main.md"))?;
         let worker_prompt = fs::read_to_string(project.join("profiles/worker.md"))?;
 
         Ok(Self {
             root,
             socket,
+            tcp_addr,
             pi_bin,
+            pi_script,
             extension,
             playwright_cli,
             main_prompt,
@@ -781,6 +795,9 @@ async fn spawn_pi(
     fs::create_dir_all(&session_dir)?;
 
     let mut command = Command::new(&context.config.pi_bin);
+    if let Some(script) = &context.config.pi_script {
+        command.arg(script);
+    }
     command
         .current_dir(&workspace)
         .arg("--mode")
@@ -809,6 +826,7 @@ async fn spawn_pi(
         .arg("--approve")
         .env("PINVOU_AIOS_HOME", &context.config.root)
         .env("PINVOU_AIOS_SOCKET", &context.config.socket)
+        .env("PINVOU_AIOS_TCP_ADDR", &context.config.tcp_addr)
         .env("PINVOU_AGENT_ROLE", role)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1795,8 +1813,11 @@ async fn dispatch(context: &AppContext, request: &Request) -> Result<Value> {
     }
 }
 
-async fn handle_client(context: AppContext, stream: UnixStream) -> Result<()> {
-    let (read_half, mut write_half) = stream.into_split();
+async fn handle_client<S>(context: AppContext, stream: S) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
     let mut events = context.events.subscribe();
     let (responses_tx, mut responses_rx) = mpsc::channel::<Value>(32);
@@ -1863,6 +1884,7 @@ async fn main() -> Result<()> {
     fs::create_dir_all(config.root.join("run"))?;
     fs::create_dir_all(config.root.join("sessions/main"))?;
     fs::create_dir_all(config.root.join("sessions/worker"))?;
+    #[cfg(unix)]
     if config.socket.exists() {
         fs::remove_file(&config.socket).with_context(|| {
             format!("failed to remove stale socket {}", config.socket.display())
@@ -1910,10 +1932,6 @@ async fn main() -> Result<()> {
         state.main.error = Some(error.to_string());
     }
 
-    let listener = UnixListener::bind(&config.socket)
-        .with_context(|| format!("failed to bind {}", config.socket.display()))?;
-    info!(socket = %config.socket.display(), pi = %config.pi_bin.display(), "Pinvou AIOS daemon ready");
-
     let notification_context = context.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -1923,14 +1941,39 @@ async fn main() -> Result<()> {
         }
     });
 
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let client_context = context.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_client(client_context, stream).await {
-                warn!(%error, "AIOS client disconnected with error");
-            }
-        });
+    #[cfg(unix)]
+    {
+        let listener = UnixListener::bind(&config.socket)
+            .with_context(|| format!("failed to bind {}", config.socket.display()))?;
+        info!(socket = %config.socket.display(), pi = %config.pi_bin.display(), "Pinvou AIOS daemon ready");
+
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let client_context = context.clone();
+            tokio::spawn(async move {
+                if let Err(error) = handle_client(client_context, stream).await {
+                    warn!(%error, "AIOS client disconnected with error");
+                }
+            });
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let listener = TcpListener::bind(&config.tcp_addr)
+            .await
+            .with_context(|| format!("failed to bind {}", config.tcp_addr))?;
+        info!(tcp = %config.tcp_addr, pi = %config.pi_bin.display(), "Pinvou AIOS daemon ready");
+
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let client_context = context.clone();
+            tokio::spawn(async move {
+                if let Err(error) = handle_client(client_context, stream).await {
+                    warn!(%error, "AIOS client disconnected with error");
+                }
+            });
+        }
     }
 }
 
@@ -1958,7 +2001,9 @@ mod tests {
         Config {
             root: root.to_path_buf(),
             socket: root.join("run/aios.sock"),
+            tcp_addr: "127.0.0.1:57931".to_owned(),
             pi_bin: root.join("pi"),
+            pi_script: None,
             extension: root.join("extension.js"),
             playwright_cli: root.join("playwright-cli"),
             main_prompt: String::new(),

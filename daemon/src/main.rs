@@ -263,6 +263,17 @@ impl Store {
                UNIQUE(task_id, relative_path)
              );
              CREATE INDEX IF NOT EXISTS artifacts_task_id_idx ON artifacts(task_id);
+             CREATE TABLE IF NOT EXISTS task_artifacts (
+               task_id TEXT NOT NULL,
+               artifact_id TEXT NOT NULL,
+               relation TEXT NOT NULL DEFAULT 'owner',
+               created_at TEXT NOT NULL,
+               PRIMARY KEY(task_id, artifact_id)
+             );
+             CREATE INDEX IF NOT EXISTS task_artifacts_artifact_id_idx
+               ON task_artifacts(artifact_id);
+             INSERT OR IGNORE INTO task_artifacts(task_id, artifact_id, relation, created_at)
+               SELECT task_id, id, 'owner', created_at FROM artifacts;
              CREATE TABLE IF NOT EXISTS artifact_revisions (
                id TEXT PRIMARY KEY,
                artifact_id TEXT NOT NULL,
@@ -427,35 +438,39 @@ impl Store {
     fn load_artifacts(&self) -> Result<HashMap<String, Vec<ArtifactView>>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, task_id, kind, title, relative_path, current_revision, created_at, updated_at
-             FROM artifacts ORDER BY created_at ASC",
+            "SELECT task_artifacts.task_id, artifacts.id, artifacts.task_id, artifacts.kind,
+                    artifacts.title, artifacts.relative_path, artifacts.current_revision,
+                    artifacts.created_at, artifacts.updated_at
+             FROM task_artifacts
+             JOIN artifacts ON artifacts.id = task_artifacts.artifact_id
+             ORDER BY task_artifacts.created_at ASC, artifacts.created_at ASC",
         )?;
         let rows = statement.query_map([], |row| {
-            let relative_path = PathBuf::from(row.get::<_, String>(4)?);
+            let relative_path = PathBuf::from(row.get::<_, String>(5)?);
             let file_name = relative_path
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("artifact")
                 .to_owned();
-            Ok(ArtifactView {
-                id: row.get(0)?,
-                task_id: row.get(1)?,
-                kind: row.get(2)?,
-                title: row.get(3)?,
-                relative_path,
-                file_name,
-                current_revision: row.get::<_, i64>(5)?.max(1) as u64,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                ArtifactView {
+                    id: row.get(1)?,
+                    task_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    title: row.get(4)?,
+                    relative_path,
+                    file_name,
+                    current_revision: row.get::<_, i64>(6)?.max(1) as u64,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                },
+            ))
         })?;
         let mut artifacts = HashMap::<String, Vec<ArtifactView>>::new();
         for row in rows {
-            let artifact = row?;
-            artifacts
-                .entry(artifact.task_id.clone())
-                .or_default()
-                .push(artifact);
+            let (linked_task_id, artifact) = row?;
+            artifacts.entry(linked_task_id).or_default().push(artifact);
         }
         Ok(artifacts)
     }
@@ -512,17 +527,64 @@ impl Store {
                kind=excluded.kind, title=excluded.title, updated_at=excluded.updated_at",
             params![id, task_id, kind, title, relative_path, timestamp],
         )?;
+        let artifact_id = connection.query_row(
+            "SELECT id FROM artifacts WHERE task_id = ?1 AND relative_path = ?2",
+            params![task_id, relative_path],
+            |row| row.get::<_, String>(0),
+        )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO task_artifacts(task_id, artifact_id, relation, created_at)
+             VALUES(?1, ?2, 'owner', ?3)",
+            params![task_id, artifact_id, timestamp],
+        )?;
         drop(connection);
-        let artifacts = self.load_artifacts()?;
-        artifacts
-            .get(task_id)
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|artifact| artifact.relative_path == PathBuf::from(relative_path))
-            })
-            .cloned()
+        self.artifact(&artifact_id)?
             .context("registered artifact disappeared")
+    }
+
+    fn artifact_for_task_path(
+        &self,
+        task_id: &str,
+        relative_path: &Path,
+    ) -> Result<Option<ArtifactView>> {
+        let relative_path = relative_path
+            .to_str()
+            .context("artifact relative path is not valid UTF-8")?;
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let artifact_id = connection
+            .query_row(
+                "SELECT id FROM artifacts WHERE task_id = ?1 AND relative_path = ?2",
+                params![task_id, relative_path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        drop(connection);
+        artifact_id
+            .map(|artifact_id| self.artifact(&artifact_id))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    fn link_task_artifact(&self, task_id: &str, artifact_id: &str, relation: &str) -> Result<()> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let changed = connection.execute(
+            "INSERT OR IGNORE INTO task_artifacts(task_id, artifact_id, relation, created_at)
+             SELECT ?1, id, ?3, ?4 FROM artifacts WHERE id = ?2",
+            params![task_id, artifact_id, relation, now()],
+        )?;
+        if changed == 0 {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM task_artifacts WHERE task_id = ?1 AND artifact_id = ?2
+                 )",
+                params![task_id, artifact_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                bail!("artifact not found: {artifact_id}");
+            }
+        }
+        Ok(())
     }
 
     fn record_artifact_revision(
@@ -802,6 +864,36 @@ fn resolve_artifact(
             .context("artifact relative path is not valid UTF-8")?,
     )?;
     Ok((artifact_view, workspace, artifact))
+}
+
+fn existing_artifact_for_legacy_reference(
+    config: &Config,
+    store: &Store,
+    legacy_path: &str,
+) -> Result<ArtifactView> {
+    let tasks_root = config.root.join("workspaces/tasks").canonicalize()?;
+    let supplied = PathBuf::from(legacy_path);
+    if !supplied.is_absolute() {
+        bail!("cross-task legacy artifact reference must be absolute");
+    }
+    let artifact = supplied
+        .canonicalize()
+        .with_context(|| format!("artifact does not exist: {}", supplied.display()))?;
+    let path_under_tasks = artifact
+        .strip_prefix(&tasks_root)
+        .context("legacy artifact is outside the AIOS task workspace root")?;
+    let owner_task_id = path_under_tasks
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .context("legacy artifact does not identify an owner task")?;
+    Uuid::parse_str(owner_task_id).context("legacy artifact has an invalid owner task id")?;
+    let (workspace, verified_artifact) =
+        task_artifact_path(config, owner_task_id, artifact.to_string_lossy().as_ref())?;
+    let relative = artifact_relative_path(&workspace, &verified_artifact)?;
+    store
+        .artifact_for_task_path(owner_task_id, &relative)?
+        .context("legacy reference does not match an already registered artifact")
 }
 
 #[derive(Debug)]
@@ -2401,6 +2493,39 @@ async fn main() -> Result<()> {
         }
         tasks.insert(task.id.clone(), task);
     }
+    let legacy_references = tasks
+        .values()
+        .filter(|task| task.artifacts.is_empty())
+        .filter_map(|task| {
+            html_artifact_from_result(&task.output)
+                .map(|legacy_path| (task.id.clone(), legacy_path.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    for (task_id, legacy_path) in legacy_references {
+        match existing_artifact_for_legacy_reference(&config, &store, &legacy_path).and_then(
+            |artifact| {
+                store.link_task_artifact(&task_id, &artifact.id, "legacy-reference")?;
+                Ok(artifact)
+            },
+        ) {
+            Ok(artifact) => {
+                if let Some(task) = tasks.get_mut(&task_id) {
+                    task.artifacts.push(artifact.clone());
+                }
+                info!(
+                    task_id = %task_id,
+                    artifact_id = %artifact.id,
+                    owner_task_id = %artifact.task_id,
+                    "linked legacy modification task to its registered artifact"
+                );
+            }
+            Err(error) => warn!(
+                %error,
+                task_id = %task_id,
+                "failed to link legacy task to a registered artifact"
+            ),
+        }
+    }
     let (events, _) = broadcast::channel(256);
     let context = Arc::new(ContextState {
         config: config.clone(),
@@ -2579,6 +2704,14 @@ mod tests {
             .unwrap();
         assert_eq!(restored.current_revision, 1);
         assert_eq!(store.load_artifacts().unwrap()[&task_id].len(), 1);
+
+        let modifying_task_id = Uuid::new_v4().to_string();
+        store
+            .link_task_artifact(&modifying_task_id, &updated.id, "legacy-reference")
+            .unwrap();
+        let linked = store.load_artifacts().unwrap();
+        assert_eq!(linked[&modifying_task_id][0].id, updated.id);
+        assert_eq!(linked[&modifying_task_id][0].task_id, task_id);
     }
 
     #[test]
@@ -2607,6 +2740,43 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.len(), 1);
         assert_eq!(legacy[0].path, "/legacy/index.html");
+    }
+
+    #[test]
+    fn legacy_cross_task_reference_only_links_an_existing_artifact() {
+        let temporary = TestDirectory::new();
+        let config = test_config(&temporary.0);
+        let store = Store::open(&temporary.0.join("state.sqlite3")).unwrap();
+        let owner_task_id = Uuid::new_v4().to_string();
+        let workspace = temporary.0.join("workspaces/tasks").join(&owner_task_id);
+        fs::create_dir_all(&workspace).unwrap();
+        let artifact_path = workspace.join("index.html");
+        fs::write(&artifact_path, "<!doctype html><title>test</title>").unwrap();
+
+        assert!(
+            existing_artifact_for_legacy_reference(
+                &config,
+                &store,
+                artifact_path.to_str().unwrap(),
+            )
+            .is_err()
+        );
+        let registered = store
+            .upsert_artifact(
+                &owner_task_id,
+                "html",
+                "已登记页面",
+                Path::new("index.html"),
+            )
+            .unwrap();
+        let resolved = existing_artifact_for_legacy_reference(
+            &config,
+            &store,
+            artifact_path.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resolved.id, registered.id);
+        assert_eq!(resolved.task_id, owner_task_id);
     }
 
     #[test]

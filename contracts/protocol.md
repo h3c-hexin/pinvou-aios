@@ -37,7 +37,7 @@
 - `artifact.modify_current`：`{ "instruction": "..." }`，由主 Agent 修改当前绑定的完整 HTML 画布；守护进程自动定位产物、保存版本并恢复原 Worker Session
 - `surface.undo`：`{ "artifactId": "..." }`
 
-首版协议仍接受旧的 `taskId + artifactPath` Surface 参数，以便迁移已经保存的任务；新客户端只应传递 `artifactId`。Task Snapshot 中的 `artifacts[]` 是产物权威索引，`Task.output` 仅保留人类可读结果，不再承担产物发现职责。
+首版协议仍接受旧的 `taskId + artifactPath` Surface 参数，以便迁移已经保存的任务；新客户端只应传递 `artifactId`。Task Snapshot 中的 `artifacts[]` 是产物权威索引，`Task.output` 仅保留人类可读结果，不再承担产物发现职责。Artifact 的 `taskId` 始终是拥有文件与 Worker Session 的原任务；任务卡片可以通过内部关联引用另一个任务拥有的 Artifact，用于兼容旧版产生的“二次修改任务”，打开与后续修改仍按 Artifact 所有者路由。
 
 语音输入产生轻量事件，避免客户端轮询完整快照：
 

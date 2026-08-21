@@ -130,6 +130,7 @@ function browserState(extra = {}) {
     editable: Boolean(currentTaskArtifact),
     editMode: surfaceEditMode,
     taskId: currentTaskArtifact?.taskId,
+    artifactId: currentTaskArtifact?.artifactId,
     canReturn: browserReturnStack.length > 0,
     contextDepth: browserReturnStack.length,
     selection: surfaceSelection
@@ -209,8 +210,12 @@ async function activateCurrentTaskArtifact() {
   if (!currentTaskArtifact) return undefined;
   return daemonRequest("surface.activate", {
     contextId: currentTaskArtifact.contextId,
-    taskId: currentTaskArtifact.taskId,
-    artifactPath: currentTaskArtifact.path,
+    ...(currentTaskArtifact.artifactId
+      ? { artifactId: currentTaskArtifact.artifactId }
+      : {
+          taskId: currentTaskArtifact.taskId,
+          artifactPath: currentTaskArtifact.path,
+        }),
   });
 }
 
@@ -232,6 +237,7 @@ async function captureBrowserEnvironment() {
     scroll,
     artifact: currentTaskArtifact
       ? {
+          artifactId: currentTaskArtifact.artifactId,
           taskId: currentTaskArtifact.taskId,
           path: currentTaskArtifact.path,
           target: currentTaskArtifact.target,
@@ -480,6 +486,19 @@ function normalizeTaskArtifactLocation(taskIdValue, locationValue) {
   };
 }
 
+function normalizeResolvedArtifact(value) {
+  if (!value || typeof value !== "object") throw new Error("AIOS 返回了无效的产物记录");
+  const artifactId = String(value.id || "").trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artifactId)) {
+    throw new Error("产物包含无效的 Artifact ID");
+  }
+  if (value.kind !== "html") throw new Error(`当前 Browser Surface 不支持 ${value.kind || "未知"} 产物`);
+  return {
+    ...normalizeTaskArtifactLocation(value.taskId, value.path),
+    artifactId,
+  };
+}
+
 function daemonRequest(method, params) {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
@@ -661,6 +680,29 @@ function registerIpc() {
       throw error;
     }
   });
+  ipcMain.handle("browser:open-artifact", async (event, { artifactId }) => {
+    trusted(event);
+    const environment = await captureBrowserEnvironment();
+    const resolved = await daemonRequest("artifact.resolve", { artifactId });
+    browserReturnStack.push(environment);
+    clearTaskArtifact();
+    currentTaskArtifact = {
+      ...normalizeResolvedArtifact(resolved),
+      contextId: crypto.randomUUID(),
+    };
+    watchCurrentArtifact();
+    browserOpen = true;
+    applyBrowserVisibility();
+    try {
+      await browserView.webContents.loadURL(currentTaskArtifact.target);
+      await activateCurrentTaskArtifact();
+      return sendBrowserState({ reason: "task-artifact" });
+    } catch (error) {
+      clearTaskArtifact();
+      await restoreBrowserEnvironment();
+      throw error;
+    }
+  });
   ipcMain.handle("browser:control", async (event, { action }) => {
     trusted(event);
     switch (action) {
@@ -724,8 +766,12 @@ function registerIpc() {
     if (!request) throw new Error("请输入修改要求");
     if (request.length > 4_000) throw new Error("单次修改要求不能超过 4000 个字符");
     return daemonRequest("surface.modify", {
-      taskId: currentTaskArtifact.taskId,
-      artifactPath: currentTaskArtifact.path,
+      ...(currentTaskArtifact.artifactId
+        ? { artifactId: currentTaskArtifact.artifactId }
+        : {
+            taskId: currentTaskArtifact.taskId,
+            artifactPath: currentTaskArtifact.path,
+          }),
       instruction: request,
       selection: surfaceSelection,
     });
@@ -734,8 +780,12 @@ function registerIpc() {
     trusted(event);
     if (!currentTaskArtifact) throw new Error("当前页面不是可编辑的任务 HTML");
     return daemonRequest("surface.undo", {
-      taskId: currentTaskArtifact.taskId,
-      artifactPath: currentTaskArtifact.path,
+      ...(currentTaskArtifact.artifactId
+        ? { artifactId: currentTaskArtifact.artifactId }
+        : {
+            taskId: currentTaskArtifact.taskId,
+            artifactPath: currentTaskArtifact.path,
+          }),
     });
   });
 }

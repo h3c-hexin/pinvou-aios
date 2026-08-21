@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld("pinvou", Object.freeze({
   browserOpenTaskArtifact(taskId, location) {
     return ipcRenderer.invoke("browser:open-task-artifact", { taskId, location });
   },
+  browserOpenArtifact(artifactId) {
+    return ipcRenderer.invoke("browser:open-artifact", { artifactId });
+  },
   browserControl(action) {
     return ipcRenderer.invoke("browser:control", { action });
   },

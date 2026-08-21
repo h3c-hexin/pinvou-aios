@@ -28,13 +28,16 @@
 - `task.list`
 - `task.status`：`{ "taskId": "..." }`
 - `task.progress`：`{ "taskId": "...", "message": "...", "percent": 30 }`
-- `task.complete`：`{ "taskId": "...", "result": "..." }`
+- `task.complete`：`{ "taskId": "...", "summary": "...", "result": "...", "artifacts": [{ "kind": "html", "path": "index.html", "title": "..." }] }`；`artifacts` 可省略，旧版 `HTML_ARTIFACT:` 首行仍兼容迁移
 - `task.cancel`：`{ "taskId": "..." }`
-- `surface.activate`：`{ "contextId": "...", "taskId": "...", "artifactPath": "..." }`，将当前任务 HTML 绑定到主 Agent 对话上下文
+- `artifact.resolve`：`{ "artifactId": "..." }`，由可信桌面宿主把 Artifact ID 解析为经过工作区校验的本地文件；不向 Agent 工具直接暴露
+- `surface.activate`：`{ "contextId": "...", "artifactId": "..." }`，将当前 Artifact 绑定到主 Agent 对话上下文
 - `surface.deactivate`：`{ "contextId": "..." }`，仅在 contextId 仍匹配时解除当前产物上下文；省略 contextId 可清理陈旧上下文
-- `surface.modify`：`{ "taskId": "...", "artifactPath": "...", "instruction": "...", "selection": { ... } }`
+- `surface.modify`：`{ "artifactId": "...", "instruction": "...", "selection": { ... } }`
 - `artifact.modify_current`：`{ "instruction": "..." }`，由主 Agent 修改当前绑定的完整 HTML 画布；守护进程自动定位产物、保存版本并恢复原 Worker Session
-- `surface.undo`：`{ "taskId": "...", "artifactPath": "..." }`
+- `surface.undo`：`{ "artifactId": "..." }`
+
+首版协议仍接受旧的 `taskId + artifactPath` Surface 参数，以便迁移已经保存的任务；新客户端只应传递 `artifactId`。Task Snapshot 中的 `artifacts[]` 是产物权威索引，`Task.output` 仅保留人类可读结果，不再承担产物发现职责。
 
 语音输入产生轻量事件，避免客户端轮询完整快照：
 

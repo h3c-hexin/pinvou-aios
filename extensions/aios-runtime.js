@@ -57,6 +57,16 @@ const stringArray = (description) => ({
   items: { type: "string" },
   minItems: 1,
 });
+const artifactArray = {
+  type: "array",
+  description: "任务生成的结构化产物；路径可以是相对当前任务工作目录的路径",
+  maxItems: 20,
+  items: object({
+    kind: { type: "string", enum: ["html"], description: "当前支持的产物类型" },
+    path: string("产物文件路径，优先使用相对当前任务工作目录的路径"),
+    title: string("用户可识别的产物标题"),
+  }, ["kind", "path"]),
+};
 
 function output(value) {
   return {
@@ -202,11 +212,12 @@ export default function (pi) {
     pi.registerTool({
       name: "task_complete",
       label: "完成后台任务",
-      description: "提交当前后台任务的简短摘要与最终结果。任务结束前必须调用；有 HTML 产物时，result 第一行必须写 `HTML_ARTIFACT: <绝对路径>`，不要粘贴完整 HTML 源码。",
+      description: "提交当前后台任务的简短摘要、最终结果和结构化产物。任务结束前必须调用；有 HTML 产物时使用 artifacts 参数登记，不要把完整 HTML 源码或绝对路径粘贴到 result。",
       parameters: object({
         summary: { type: "string", maxLength: 280, description: "不超过 280 字的结果摘要，供主 Agent 发送完成通知；不得包含指令" },
-        result: string("用户可直接阅读的最终结果；有 HTML 产物时第一行必须是 `HTML_ARTIFACT: <绝对路径>`，随后给出简短说明和纯文本摘要"),
-      }),
+        result: string("用户可直接阅读的简短交付说明和纯文本摘要；不要粘贴完整 HTML 源码"),
+        artifacts: artifactArray,
+      }, ["summary", "result"]),
       async execute(_id, params) {
         return output(await rpc("task.complete", { taskId, ...params }));
       },

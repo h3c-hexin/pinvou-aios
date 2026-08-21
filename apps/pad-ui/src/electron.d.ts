@@ -16,6 +16,7 @@ interface PinvouBrowserState {
   editable?: boolean;
   editMode?: boolean;
   taskId?: string;
+  artifactId?: string;
   canReturn?: boolean;
   contextDepth?: number;
   selection?: PinvouSurfaceSelection;
@@ -45,6 +46,7 @@ interface PinvouBridge {
   browserStatus(): Promise<PinvouBrowserState>;
   browserOpen(location: string): Promise<PinvouBrowserState>;
   browserOpenTaskArtifact(taskId: string, location: string): Promise<PinvouBrowserState>;
+  browserOpenArtifact(artifactId: string): Promise<PinvouBrowserState>;
   browserControl(action: BrowserAction): Promise<PinvouBrowserState>;
   browserSetBounds(bounds: {
     x?: number;

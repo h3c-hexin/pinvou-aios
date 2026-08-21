@@ -41,7 +41,19 @@ interface Task {
   progress: number;
   progressMessage: string;
   output: string;
+  artifacts?: Artifact[];
   error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface Artifact {
+  id: string;
+  taskId: string;
+  kind: "html";
+  title: string;
+  fileName: string;
+  currentRevision: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -58,6 +70,7 @@ interface Snapshot {
   tasks: Task[];
   activeArtifact?: {
     contextId: string;
+    artifactId: string;
     taskId: string;
     title: string;
     artifactRef: string;
@@ -80,6 +93,7 @@ interface BrowserState {
   editable?: boolean;
   editMode?: boolean;
   taskId?: string;
+  artifactId?: string;
   canReturn?: boolean;
   contextDepth?: number;
   selection?: SurfaceSelection;
@@ -138,9 +152,14 @@ function isBrowserPlaceholder(location?: string) {
 }
 
 function htmlArtifactLocation(task: Task) {
+  if (task.artifacts !== undefined) return undefined;
   if (task.state !== "completed") return undefined;
   const match = task.output.match(/(?:^|\n)HTML_ARTIFACT:\s*([^\r\n]+)/i);
   return match?.[1].trim();
+}
+
+function primaryHtmlArtifact(task: Task) {
+  return task.artifacts?.find((artifact) => artifact.kind === "html");
 }
 
 async function daemonRequest<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -160,7 +179,7 @@ function statusLabel(state: TaskState) {
 
 function TaskChip({ task, onOpen, onCancel }: { task: Task; onOpen: () => void; onCancel: () => void }) {
   const active = task.state === "running" || task.state === "queued";
-  const hasHtmlArtifact = Boolean(htmlArtifactLocation(task));
+  const hasHtmlArtifact = Boolean(primaryHtmlArtifact(task) || htmlArtifactLocation(task));
   return (
     <article className="task-chip" onClick={onOpen}>
       <div className="task-chip__top">
@@ -626,8 +645,9 @@ function App() {
   }
 
   async function openTask(task: Task) {
-    const artifact = htmlArtifactLocation(task);
-    if (!artifact) {
+    const artifact = primaryHtmlArtifact(task);
+    const legacyLocation = htmlArtifactLocation(task);
+    if (!artifact && !legacyLocation) {
       setSelectedTask(task);
       return;
     }
@@ -635,7 +655,9 @@ function App() {
     setBrowserBusy(true);
     setBrowserError(undefined);
     try {
-      const state = await window.pinvou.browserOpenTaskArtifact(task.id, artifact);
+      const state = artifact
+        ? await window.pinvou.browserOpenArtifact(artifact.id)
+        : await window.pinvou.browserOpenTaskArtifact(task.id, legacyLocation!);
       setBrowserState(state);
       setBrowserLocation(state.location);
       setSelectedTask(undefined);

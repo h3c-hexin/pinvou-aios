@@ -6,7 +6,7 @@
 
 - `pinvou-aiosd` 常驻守护进程，通过 Unix Socket 暴露 JSONL API；
 - 一个持久化的 Pi RPC 主 Agent；
-- 主 Agent 通过扩展工具创建、查询和取消后台任务 Agent；
+- 主 Agent 通过单一 `task` 工具的 `create/list/get/cancel` action 管理后台任务 Agent；daemon 内部仍保留细粒度任务 RPC；
 - 主 Agent 通过单一 `playwright_cli` 工具使用官方 Playwright CLI 的全部命令，控制 AIOS 内置的人机共享 Chromium，同时不获得 Bash；
 - React + Electron 的 PAD 桌面壳展示主对话、后台任务和内置 Browser Surface；
 - Electron 可信 UI 提供单次与连续语音模式，通过 Token Plan 的 `qwen-audio-3.0-asr-flash` 识别后自动进入 Pi 主 Agent；

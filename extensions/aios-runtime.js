@@ -67,6 +67,11 @@ const artifactArray = {
     title: string("用户可识别的产物标题"),
   }, ["kind", "path"]),
 };
+const taskAction = {
+  type: "string",
+  enum: ["create", "list", "get", "cancel"],
+  description: "后台任务操作：创建、列出、查询单个任务或取消任务",
+};
 
 function output(value) {
   return {
@@ -125,7 +130,7 @@ export default function (pi) {
               `title: ${event.title}`,
               `summary: ${event.summary}`,
               `resultRef: ${event.resultRef}`,
-              "请只发送一句简洁的中文完成通知，引导用户点击右侧任务卡片查看；不要调用 task_status，不要复制完整结果。",
+              "请只发送一句简洁的中文完成通知，引导用户点击右侧任务卡片查看；不要使用 task 的 list/get 操作，不要复制完整结果。",
             ].join("\n"),
             display: false,
             details: event,
@@ -137,22 +142,47 @@ export default function (pi) {
     });
 
     pi.registerTool({
-      name: "task_create",
-      label: "创建后台任务",
-      description: "创建一个独立、持久运行的后台 Worker Agent。用于耗时、可并行或无需继续占用主对话的工作。Worker 对适合展示的结果默认采用 HTML-first 交付；除非用户明确指定，不要在 objective 中要求 Markdown 或纯文本。",
-      parameters: object({ title: string("简短的任务标题"), objective: string("包含完整上下文、内容约束和验收要求的任务目标；通常不指定 Markdown，由 Worker 使用默认 HTML-first 策略") }),
+      name: "task",
+      label: "后台任务",
+      description: "管理 AIOS 后台 Worker：action=create 创建任务，list 列出任务，get 查询单个任务，cancel 取消任务。create 用于耗时、可并行或无需继续占用主对话的工作；默认遵循 Worker 的 HTML-first 交付策略。只传当前 action 需要的字段。",
+      promptSnippet: "通过一个统一入口管理后台任务的创建、查询与取消",
+      promptGuidelines: [
+        "创建任务使用 action=create，并提供 title 和包含完整上下文的 objective；不要假设 Worker 能看到主对话历史。",
+        "列出任务使用 action=list；查询单个任务使用 action=get 和 taskId；取消任务使用 action=cancel 和 taskId。",
+        "除非用户明确指定其他格式，不要在 objective 中要求 Markdown 或纯文本，由 Worker 使用 HTML-first 默认策略。",
+      ],
+      parameters: object({
+        action: taskAction,
+        taskId: string("get 或 cancel 操作所需的任务 ID"),
+        title: string("create 操作所需的简短任务标题"),
+        objective: string("create 操作所需的完整任务目标、内容约束和验收要求"),
+      }, ["action"]),
       async execute(_id, params) {
-        return output(await rpc("task.create", params));
+        switch (params.action) {
+          case "create":
+            return output(await rpc("task.create", {
+              title: params.title,
+              objective: params.objective,
+            }));
+          case "list":
+            return output(await rpc("task.list"));
+          case "get":
+            return output(await rpc("task.status", { taskId: params.taskId }));
+          case "cancel":
+            return output(await rpc("task.cancel", { taskId: params.taskId }));
+          default:
+            throw new Error(`unsupported task action: ${params.action}`);
+        }
       },
     });
 
     pi.registerTool({
       name: "artifact_modify_current",
       label: "修改当前产物",
-      description: "修改用户当前在 AIOS Browser Surface 中打开的任务 HTML。AIOS 会自动定位产物、保存修改前版本，并恢复生成它的原 Worker Session；不要传文件路径或另建任务。仅用于修改当前产物；用户明确要求另做独立版本时才使用 task_create。",
+      description: "修改用户当前在 AIOS Browser Surface 中打开的任务 HTML。AIOS 会自动定位产物、保存修改前版本，并恢复生成它的原 Worker Session；不要传文件路径或另建任务。仅用于修改当前产物；用户明确要求另做独立版本时才使用 task 的 create 操作。",
       promptSnippet: "通过原 Worker Session 安全修改当前打开的 HTML 产物",
       promptGuidelines: [
-        "用户要求修改当前页面、当前 HTML、这个产物或其中内容时，调用 artifact_modify_current；不要调用 task_create，也不要使用 playwright_cli 写文件。",
+        "用户要求修改当前页面、当前 HTML、这个产物或其中内容时，调用 artifact_modify_current；不要调用 task 创建新任务，也不要使用 playwright_cli 写文件。",
         "instruction 应忠实保留用户目标和约束。调用前可用 playwright_cli snapshot 观察页面；修改由产物所属 Worker 在后台执行。",
       ],
       parameters: object({
@@ -164,35 +194,6 @@ export default function (pi) {
       },
     });
 
-    pi.registerTool({
-      name: "task_list",
-      label: "后台任务列表",
-      description: "查看所有后台任务及其当前状态。",
-      parameters: object({}, []),
-      async execute() {
-        return output(await rpc("task.list"));
-      },
-    });
-
-    pi.registerTool({
-      name: "task_status",
-      label: "后台任务状态",
-      description: "查看一个后台任务的进度和结果。",
-      parameters: object({ taskId: string("任务 ID") }),
-      async execute(_id, params) {
-        return output(await rpc("task.status", params));
-      },
-    });
-
-    pi.registerTool({
-      name: "task_cancel",
-      label: "取消后台任务",
-      description: "取消指定的后台任务。",
-      parameters: object({ taskId: string("任务 ID") }),
-      async execute(_id, params) {
-        return output(await rpc("task.cancel", params));
-      },
-    });
   }
 
   if (role === "worker") {

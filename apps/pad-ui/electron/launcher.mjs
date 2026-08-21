@@ -26,7 +26,9 @@ function reserveLoopbackPort() {
   });
 }
 
-const cdpPort = await reserveLoopbackPort();
+const internalCdpPort = await reserveLoopbackPort();
+let gatewayCdpPort = await reserveLoopbackPort();
+while (gatewayCdpPort === internalCdpPort) gatewayCdpPort = await reserveLoopbackPort();
 const electronArguments = [mainModule];
 if (process.env.PINVOU_ELECTRON_NO_SANDBOX === "1") {
   console.warn("[pinvou-aios] WARNING: Chromium sandbox is disabled for this development run");
@@ -45,7 +47,8 @@ if (process.env.PINVOU_ELECTRON_NO_SANDBOX === "1") {
 const child = spawn(electron, electronArguments, {
   env: {
     ...process.env,
-    PINVOU_BROWSER_CDP_PORT: String(cdpPort),
+    PINVOU_BROWSER_CDP_INTERNAL_PORT: String(internalCdpPort),
+    PINVOU_BROWSER_CDP_PORT: String(gatewayCdpPort),
   },
   stdio: "inherit",
 });

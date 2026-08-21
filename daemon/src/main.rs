@@ -2081,6 +2081,53 @@ mod tests {
         assert_eq!(visible_main_user_message(&nested), spoken);
     }
 
+    #[test]
+    fn jsonl_wire_contract_keeps_camel_case_and_private_artifact_paths() {
+        let task_id = Uuid::new_v4().to_string();
+        let artifact = ActiveArtifactView {
+            context_id: Uuid::new_v4().to_string(),
+            task_id: task_id.clone(),
+            title: "测试画布".to_owned(),
+            artifact_ref: format!("artifact://{task_id}/index.html"),
+            file_name: "index.html".to_owned(),
+            task_updated_at: "2026-08-21T00:00:00Z".to_owned(),
+            artifact_path: PathBuf::from("/private/task/index.html"),
+        };
+        let snapshot = Snapshot {
+            seq: 42,
+            main: MainAgentView {
+                session_id: "main-session".to_owned(),
+                status: "idle".to_owned(),
+                streaming_text: String::new(),
+                error: None,
+                messages: Vec::new(),
+            },
+            tasks: Vec::new(),
+            active_artifact: Some(artifact),
+        };
+        let wire = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(
+            wire.pointer("/main/sessionId"),
+            Some(&json!("main-session"))
+        );
+        assert!(wire.pointer("/main/session_id").is_none());
+        assert_eq!(
+            wire.pointer("/activeArtifact/fileName"),
+            Some(&json!("index.html"))
+        );
+        assert!(wire.pointer("/activeArtifact/artifactPath").is_none());
+
+        let request: Request = serde_json::from_value(json!({
+            "id": "contract-1",
+            "method": "snapshot.get"
+        }))
+        .unwrap();
+        assert_eq!(request.id.as_deref(), Some("contract-1"));
+        assert_eq!(request.method, "snapshot.get");
+        assert!(request.params.is_null());
+    }
+
     #[cfg(unix)]
     #[test]
     fn task_artifact_rejects_symlink_escape() {

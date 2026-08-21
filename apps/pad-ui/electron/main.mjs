@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { app, BaseWindow, WebContentsView, ipcMain, safeStorage, session } from "electron";
 
 import { recognizeWithTokenPlan } from "./asr.mjs";
+import { AgentCdpGateway } from "./cdp-gateway.mjs";
 import { DaemonEventStream } from "./daemon-events.mjs";
 import { VoiceOutputGateway } from "./tts.mjs";
 
@@ -16,21 +17,23 @@ const appDirectory = path.dirname(electronDirectory);
 const aiosHome = process.env.PINVOU_AIOS_HOME || path.join(os.homedir(), ".pinvou-aios");
 const socketPath = process.env.PINVOU_AIOS_SOCKET || path.join(aiosHome, "run", "aios.sock");
 const cdpPort = Number.parseInt(process.env.PINVOU_BROWSER_CDP_PORT || "", 10);
+const internalCdpPort = Number.parseInt(process.env.PINVOU_BROWSER_CDP_INTERNAL_PORT || "", 10);
 const cdpEndpoint = `http://127.0.0.1:${cdpPort}`;
+const internalCdpEndpoint = `http://127.0.0.1:${internalCdpPort}`;
 const cdpStatePath = path.join(aiosHome, "run", "browser-cdp.json");
 const tokenPlanCredentialPath = path.join(aiosHome, "credentials", "token-plan.enc");
 const instanceId = crypto.randomUUID();
 
-console.log(`[pinvou-aios] Electron main starting (pid=${process.pid}, cdp=${cdpEndpoint})`);
+console.log(`[pinvou-aios] Electron main starting (pid=${process.pid}, agent-cdp=${cdpEndpoint})`);
 
-if (!Number.isInteger(cdpPort) || cdpPort <= 0 || cdpPort > 65535) {
-  throw new Error("PINVOU_BROWSER_CDP_PORT must contain a valid TCP port");
+if (![cdpPort, internalCdpPort].every((port) => Number.isInteger(port) && port > 0 && port <= 65535)) {
+  throw new Error("PINVOU_BROWSER_CDP_PORT and PINVOU_BROWSER_CDP_INTERNAL_PORT must contain valid TCP ports");
 }
 
 fs.mkdirSync(path.join(aiosHome, "electron"), { recursive: true });
 app.setPath("userData", path.join(aiosHome, "electron"));
 app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
-app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
+app.commandLine.appendSwitch("remote-debugging-port", String(internalCdpPort));
 app.commandLine.appendSwitch("disable-features", "AutofillServerCommunication");
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -54,6 +57,7 @@ let voiceRecognitionInFlight = false;
 let daemonEventStream;
 let tokenPlanApiKey;
 let voiceOutput;
+let cdpGateway;
 
 function loadTokenPlanCredential() {
   const fromEnvironment = String(process.env.PINVOU_TOKEN_PLAN_API_KEY || "").trim();
@@ -355,12 +359,25 @@ function createBrowserSurface() {
   browserView = new WebContentsView({
     webPreferences: {
       preload: path.join(electronDirectory, "browser-preload.cjs"),
+      partition: "persist:pinvou-browser",
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
     },
   });
+  const browserSession = browserView.webContents.session;
+  browserSession.setPermissionCheckHandler(() => false);
+  browserSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  browserSession.webRequest.onBeforeRequest(
+    {
+      urls: [
+        `http://127.0.0.1:${internalCdpPort}/*`,
+        `ws://127.0.0.1:${internalCdpPort}/*`,
+      ],
+    },
+    (_details, callback) => callback({ cancel: true }),
+  );
   mainWindow.contentView.addChildView(browserView);
   browserView.setVisible(false);
   browserView.webContents.loadURL("about:blank#pinvou-browser-surface");
@@ -804,6 +821,7 @@ if (hasSingleInstanceLock) {
     daemonEventStream?.stop();
     voiceOutput?.cancel();
     removeCdpEndpoint();
+    void cdpGateway?.close();
   });
   app.on("window-all-closed", () => app.quit());
   app.whenReady().then(async () => {
@@ -814,8 +832,13 @@ if (hasSingleInstanceLock) {
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     await createMainWindow();
     console.log("[pinvou-aios] main window created");
+    cdpGateway = new AgentCdpGateway({
+      upstreamEndpoint: internalCdpEndpoint,
+      port: cdpPort,
+    });
+    await cdpGateway.start();
     await publishCdpEndpoint();
-    console.log(`[pinvou-aios] embedded Chromium ready at ${cdpEndpoint}`);
+    console.log(`[pinvou-aios] protected Browser Surface ready at ${cdpEndpoint}`);
   }).catch((error) => {
     console.error("[pinvou-aios] failed to start Electron shell", error);
     app.exit(1);

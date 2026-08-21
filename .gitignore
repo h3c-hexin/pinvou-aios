@@ -1,6 +1,6 @@
 **/target/
-/.playwright/
-/.playwright-cli/
+**/.playwright/
+**/.playwright-cli/
 /browser/node_modules/
 /apps/pad-ui/node_modules/
 /apps/pad-ui/dist/
